@@ -478,6 +478,13 @@ async def make_request_data_and_publish_sub_queue(parsed_data, result, params, t
             "bridge_name" : parsed_data.get('name', ''),
             "chatbot_auto_answers": parsed_data.get('chatbot_auto_answers')
         },
+        "type": parsed_data.get("type"),
+        "save_files_to_redis": {
+            "thread_id": parsed_data.get("thread_id"),
+            "sub_thread_id": parsed_data.get("sub_thread_id"),
+            "bridge_id": parsed_data.get("bridge_id"),
+            "files": parsed_data.get("files"),
+        },
         "broadcast_response_webhook": {
             "bridge_id": parsed_data.get("bridge_id"),
             "org_id": parsed_data.get("org_id"),
