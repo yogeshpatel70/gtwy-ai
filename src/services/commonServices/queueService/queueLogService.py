@@ -11,6 +11,8 @@ from src.services.commonServices.baseService.utils import total_token_calculatio
 from src.controllers.conversationController import save_sub_thread_id_and_name
 from src.services.commonServices.queueService.baseQueue import BaseQueue
 from src.services.utils.hippocampus_utils import save_conversation_to_hippocampus
+from src.services.utils.logger import logger
+from src.services.utils.send_error_webhook import send_error_to_webhook
 
 
 class Queue2(BaseQueue):
@@ -46,14 +48,17 @@ class Queue2(BaseQueue):
             )
         
         # await create(**messages['metrics_service'])
-        await validateResponse(**messages['validateResponse'])
-        await total_token_calculation(**messages['total_token_calculation'])
-        if messages['check_handle_gpt_memory']['gpt_memory']:
-            await handle_gpt_memory(**messages['handle_gpt_memory'])
-        if messages['check_chatbot_suggestions']['bridgeType']:
-            await chatbot_suggestions(**messages['chatbot_suggestions'])
-        await save_files_to_redis(**messages['save_files_to_redis'])
-
+        await validateResponse(**messages["validateResponse"])
+        await total_token_calculation(**messages["total_token_calculation"])
+        if messages["check_handle_gpt_memory"]["gpt_memory"]:
+            await handle_gpt_memory(**messages["handle_gpt_memory"])
+        if messages["check_chatbot_suggestions"]["bridgeType"]:
+            await chatbot_suggestions(**messages["chatbot_suggestions"])
+        await save_files_to_redis(**messages["save_files_to_redis"])
+        
+        # Send broadcast response to webhook if configured
+        if messages.get("broadcast_response_webhook"):
+            await send_error_to_webhook(**messages["broadcast_response_webhook"])
 
     async def consume_messages(self):
         try:
