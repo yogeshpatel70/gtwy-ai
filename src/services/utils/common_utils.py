@@ -348,10 +348,13 @@ async def prepare_prompt(parsed_data, thread_info, model_config, custom_config):
                     memory = memory.decode('utf-8')
                 parsed_data['memory'] = memory
             else:
-                response, _ = await fetch("https://flow.sokt.io/func/scriCJLHynCG", "POST", None, None, {"threadID": id})
-                parsed_data['memory'] = response
-        configuration['prompt'], missing_vars = Helper.replace_variables_in_prompt(configuration['prompt'], variables)
-        
+                response, _ = await fetch(
+                    "https://flow.sokt.io/func/scriCJLHynCG", "POST", None, None, {"threadID": id}
+                )
+                parsed_data["memory"] = response
+                memory = response
+        configuration["prompt"], missing_vars = Helper.replace_variables_in_prompt(configuration["prompt"], variables)
+
         if template:
             system_prompt = template
             configuration['prompt'], missing_vars = Helper.replace_variables_in_prompt(
