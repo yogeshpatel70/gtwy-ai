@@ -159,52 +159,125 @@ def parse_request_body(request_body):
         "tool_id_and_name_mapping": body.get("tool_id_and_name_mapping"),
         "suggest": body.get("suggest", False),
         "message_id": str(uuid.uuid1()),
-        "reasoning_model": body.get("configuration", {}).get('model') in {'o1-preview', 'o1-mini'},
-        "gpt_memory": body.get('gpt_memory'),
-        "version_id": body.get('version_id'),
-        "gpt_memory_context": body.get('gpt_memory_context'),
-        "usage" : {},
-        "type" : body.get('configuration',{}).get('type'),
-        "apikey_object_id" : body.get('apikey_object_id'),
-        "images" :  body.get('images') or [url.get('url') for url in body.get('user_urls', []) if isinstance(url, dict) and url.get('type') == 'image' and url.get('url')],
-        "tool_call_count": body.get('tool_call_count'),
-        "tokens" : {},
-        "memory" : "",
-        "bridge_summary" : body.get('bridge_summary'),
-        "batch" : body.get('batch') or [],
-        "batch_webhook" : body.get('webhook'),
-        "doc_ids":body.get('ddc_ids'),
-        "rag_data": body.get('rag_data'),
-        "name" : body.get('name'),
-        "org_name" : body.get('org_name'),
-        "variables_state" : body.get('variables_state'),
-        "built_in_tools" : body.get('built_in_tools') or [],
-        "thread_flag" : body.get('thread_flag') or False,
-        "files" : body.get('files') or [],
-        "fall_back" : body.get('fall_back') or {},
-        "guardrails" : body.get('bridges', {}).get('guardrails') or {},
-        "testcase_data" : body.get('testcase_data') or {},
-        "is_embed" : body.get('is_embed'),
-        "user_id" : body.get('user_id'),
-        "file_data" : body.get('video_data') or {},
-        "youtube_url" : body.get('youtube_url') or None,
-        "folder_id": body.get('folder_id'),
-        "web_search_filters" : body.get('web_search_filters') or None,
-        "parent_bridge_id": body.get('parent_bridge_id'),
-        "transfer_request_id": body.get('transfer_request_id'),
-        "orchestrator_flag": body.get('orchestrator_flag'),
-        "batch_variables": body.get('batch_variables'),
-        "chatbot_auto_answers": body.get('chatbot_auto_answers')
+        "reasoning_model": body.get("configuration", {}).get("model") in {"o1-preview", "o1-mini"},
+        "gpt_memory": body.get("gpt_memory"),
+        "version_id": body.get("version_id"),
+        "gpt_memory_context": body.get("gpt_memory_context"),
+        "usage": {},
+        "type": body.get("configuration", {}).get("type"),
+        "apikey_object_id": body.get("apikey_object_id"),
+        "audios": [
+            url.get("url")
+            for url in body.get("user_urls", [])
+            if isinstance(url, dict) and url.get("type") == "audio" and url.get("url")
+        ],
+        "images": body.get("images")
+        or [
+            url.get("url")
+            for url in body.get("user_urls", [])
+            if isinstance(url, dict) and url.get("type") == "image" and url.get("url")
+        ],
+        "tool_call_count": body.get("tool_call_count"),
+        "tokens": {},
+        "memory": "",
+        "bridge_summary": body.get("bridge_summary"),
+        "batch": body.get("batch") or [],
+        "batch_webhook": body.get("webhook"),
+        "doc_ids": body.get("ddc_ids"),
+        "rag_data": body.get("rag_data"),
+        "name": body.get("name"),
+        "org_name": body.get("org_name"),
+        "variables_state": body.get("variables_state"),
+        "built_in_tools": body.get("built_in_tools") or [],
+        "thread_flag": body.get("thread_flag") or False,
+        "files": body.get("files") or [],
+        "fall_back": body.get("fall_back") or {},
+        "guardrails": body.get("bridges", {}).get("guardrails") or {},
+        "testcase_data": body.get("testcase_data") or {},
+        "is_embed": body.get("is_embed"),
+        "user_id": body.get("user_id"),
+        "file_data": body.get("video_data") or {},
+        "youtube_url": body.get("youtube_url") or None,
+        "folder_id": body.get("folder_id"),
+        "web_search_filters": body.get("web_search_filters") or None,
+        "parent_bridge_id": body.get("parent_bridge_id"),
+        "transfer_request_id": body.get("transfer_request_id"),
+        "orchestrator_flag": body.get("orchestrator_flag"),
+        "batch_variables": body.get("batch_variables"),
+        "chatbot_auto_answers": body.get("chatbot_auto_answers"),
+        "owner_id": state.get("profile", {}).get("owner_id"),
+        "richui_templates": body.get("richui_templates", {}),
     }
 
 
+async def apply_prompt_wrapper(parsed_data):
+    """
+    Apply prompt wrapper overrides when a valid wrapper_id is present.
+    """
+    wrapper_id = parsed_data.get("wrapper_id") or parsed_data.get("body", {}).get("wrapper_id")
+    if not wrapper_id:
+        return
+
+    wrapper_doc = await ConfigurationService.get_prompt_wrapper_by_id(str(wrapper_id), parsed_data.get("org_id"))
+    if not wrapper_doc:
+        return
+
+    wrapper_template = wrapper_doc.get("template")
+    config_prompt = parsed_data["configuration"].get("prompt", "")
+
+    template_context = {"prompt": config_prompt, **parsed_data.get("variables", {})}
+
+
+    final_prompt = None
+    if wrapper_template:
+        final_prompt, _ = Helper.replace_variables_in_prompt(wrapper_template, template_context)
+        parsed_data["configuration"]["prompt"] = final_prompt
+
+
+def convert_prompt_to_string(prompt):
+
+    if isinstance(prompt, dict):
+        parts = []
+        
+        # Add role if present
+        if prompt.get("role"):
+            parts.append(f"Role: {prompt['role']}")
+        
+        # Add goal if present
+        if prompt.get("goal"):
+            parts.append(f"Goal: {prompt['goal']}")
+        
+        # Add instructions if present
+        instruction_value = prompt.get("instruction")
+        if instruction_value:
+            parts.append(f"Instructions: {instruction_value}")
+                
+        return "\n\n".join(parts)
+    
+    if prompt is None:
+        return ""
+    
+    return str( prompt)
+
 
 def add_default_template(prompt):
-    prompt += ' \n ### CURRENT TIME (For reference only) \n{{current_time_date_and_current_identifier}}'
+    suffix = " \n ### CURRENT TIME (For reference only) \n{{current_time_date_and_current_identifier}}"
+    
+    if isinstance(prompt, dict):
+        if prompt.get("customPrompt"):
+             prompt["customPrompt"] += suffix
+        elif prompt.get("instruction"):
+             prompt["instruction"] += suffix
+
+    else:
+        # String case
+        prompt = convert_prompt_to_string(prompt) + suffix
+
     return prompt
 
-def add_user_in_varaibles(variables, user):
-    variables['_user_message'] = user
+
+def add_user_in_variables(variables, user):
+    variables["_user_message"] = user
     return variables
 
 
@@ -246,11 +319,12 @@ async def handle_fine_tune_model(parsed_data, custom_config):
         custom_config["model"] = parsed_data["fine_tune_model"]
 
 
-async def handle_pre_tools(parsed_data):
-    if parsed_data['pre_tools']:
-        if parsed_data['pre_tools'].get('args') is None:
-            parsed_data['pre_tools']['args'] = {}
-        parsed_data['pre_tools']['args']['user'] = parsed_data['user']
+async def handle_pre_tools(parsed_data,custom_config):
+    if parsed_data["pre_tools"]:
+        if parsed_data["pre_tools"].get("args") is None:
+            parsed_data["pre_tools"]["args"] = {}
+        parsed_data["pre_tools"]["args"]["user"] = parsed_data["user"]
+        parsed_data["pre_tools"]["args"]["_response_type"] = parsed_data["configuration"]["response_type"]
         pre_function_response = await axios_work(
             parsed_data["pre_tools"].get("args", {}),
             {"url": f"https://flow.sokt.io/func/{parsed_data['pre_tools'].get('name')}"},
@@ -260,7 +334,10 @@ async def handle_pre_tools(parsed_data):
                 f"Error while calling prefunction. Error message: {pre_function_response.get('response')}"
             )
         else:
-            parsed_data['variables']['pre_function'] = pre_function_response.get('response')
+            parsed_data["variables"]["pre_function"] = pre_function_response.get("response")
+            response_data = pre_function_response.get("response", {})
+            
+            Helper.update_agentconfig_from_pre_function(response_data, parsed_data, custom_config)
 
 async def manage_threads(parsed_data):
     thread_id = parsed_data["thread_id"]
@@ -356,10 +433,15 @@ async def prepare_prompt(parsed_data, thread_info, model_config, custom_config):
                     memory = memory.decode("utf-8")
                 parsed_data["memory"] = memory
             else:
-                response, _ = await fetch("https://flow.sokt.io/func/scriCJLHynCG", "POST", None, None, {"threadID": id})
-                parsed_data['memory'] = response
-        configuration['prompt'], missing_vars = Helper.replace_variables_in_prompt(configuration['prompt'], variables)
-        
+                response, _ = await fetch(
+                    "https://flow.sokt.io/func/scriCJLHynCG", "POST", None, None, {"threadID": id}
+                )
+                parsed_data["memory"] = response
+                memory = response
+        configuration["prompt"], missing_vars = Helper.replace_variables_in_prompt(
+            configuration.get("prompt") or "", variables
+        )
+
         if template:
             system_prompt = template
             configuration["prompt"], missing_vars = Helper.replace_variables_in_prompt(
@@ -385,10 +467,11 @@ async def prepare_prompt(parsed_data, thread_info, model_config, custom_config):
                 case "text":
                     custom_config["response_type"] = {"type": "text"}
                 case _:
-                    custom_config['response_type'] = res
-        if parsed_data['bridge_summary']is not None:
-            parsed_data['bridge_summary'], missing_vars = Helper.replace_variables_in_prompt(parsed_data['bridge_summary'], variables)
-        
+                    custom_config["response_type"] = res
+        if parsed_data["bridge_summary"] is not None:
+            parsed_data["bridge_summary"], missing_vars = Helper.replace_variables_in_prompt(
+                parsed_data["bridge_summary"], variables
+            )
         return memory, missing_vars
 
     return memory, []
@@ -456,6 +539,7 @@ def build_service_params(
         "bridge_configurations": bridge_configurations,
         "owner_id": parsed_data.get("owner_id"),
     }
+
 
 async def process_background_tasks(
     parsed_data, result, params, thread_info, transfer_request_id=None, bridge_configurations=None
@@ -586,8 +670,55 @@ async def process_background_tasks_for_error(parsed_data, error):
     # Filter out None values
     await asyncio.gather(*[task for task in tasks if task is not None], return_exceptions=True)
 
-def build_service_params_for_batch(parsed_data, custom_config, model_output_config):
+
+async def process_batch_background_tasks(parsed_data, result, processed_prompts, batch_variables):
+    """
+    Process background tasks for batch API including conversation log creation and subthread saving.
     
+    Args:
+        parsed_data: Parsed request data
+        result: Result from batch execution containing batch_id and messages
+        processed_prompts: List of processed prompts for each batch message
+        batch_variables: List of variables for each batch message
+    """
+    from src.db_services.metrics_service import create_batch_conversation_logs
+    
+    batch_id = result.get("batch_id")
+    messages = result.get("messages", [])
+    
+    tasks = []
+    
+    # Task 1: Save batch conversation logs
+    if batch_id and messages:
+        tasks.append(
+            create_batch_conversation_logs(
+                batch_id=batch_id,
+                messages=messages,
+                parsed_data=parsed_data,
+                processed_prompts=processed_prompts,
+                batch_variables=batch_variables
+            )
+        )
+    
+    # Task 2: Save subthread information (only if thread_id and sub_thread_id exist)
+    if parsed_data.get("thread_id") and parsed_data.get("sub_thread_id"):
+        tasks.append(
+            save_sub_thread_id_and_name(
+                parsed_data["thread_id"],
+                parsed_data["sub_thread_id"],
+                parsed_data["org_id"],
+                parsed_data.get("thread_flag", False),
+                parsed_data.get("response_format", {}),
+                parsed_data["bridge_id"],
+                parsed_data["user"],
+            )
+        )
+    
+    # Execute all tasks in parallel without blocking
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+def build_service_params_for_batch(parsed_data, custom_config, model_output_config):
     return {
         "customConfig": custom_config,
         "configuration": parsed_data["configuration"],
@@ -605,17 +736,22 @@ def build_service_params_for_batch(parsed_data, custom_config, model_output_conf
         "template": parsed_data["template"],
         "response_format": parsed_data["response_format"],
         "execution_time_logs": [],
-        "variables_path": parsed_data['variables_path'],
-        "message_id": parsed_data['message_id'],
-        "bridgeType": parsed_data['bridgeType'],
-        "reasoning_model": parsed_data['reasoning_model'],
-        "type": parsed_data['configuration'].get('type'),
-        "apikey_object_id" : parsed_data['apikey_object_id'],
-        "batch" : parsed_data['batch'],
-        "webhook" : parsed_data['batch_webhook'],
-        "folder_id": parsed_data.get('folder_id'),
-        "batch_variables": parsed_data['batch_variables'],
-        "processed_prompts": parsed_data.get('processed_prompts', [])
+        "variables_path": parsed_data["variables_path"],
+        "message_id": parsed_data["message_id"],
+        "bridgeType": parsed_data["bridgeType"],
+        "reasoning_model": parsed_data["reasoning_model"],
+        "type": parsed_data["configuration"].get("type"),
+        "apikey_object_id": parsed_data["apikey_object_id"],
+        "batch": parsed_data["batch"],
+        "webhook": parsed_data["batch_webhook"],
+        "folder_id": parsed_data.get("folder_id"),
+        "batch_variables": parsed_data["batch_variables"],
+        "processed_prompts": parsed_data.get("processed_prompts", []),
+        "thread_id": parsed_data.get("thread_id"),
+        "sub_thread_id": parsed_data.get("sub_thread_id"),
+        "gpt_memory_context": parsed_data.get("gpt_memory_context", ""),
+        "files": parsed_data.get("files", []),
+        "version_id": parsed_data.get("version_id", ""),
     }
 
 
@@ -818,6 +954,7 @@ def update_usage_metrics(parsed_data, params, latency, result=None, error=None, 
     """
     Update usage metrics with latency and other information.
     Handles both success and error cases with a unified interface.
+    Supports both chat models and image models with proper token calculation.
     
     Args:
         parsed_data: Dictionary containing parsed request data
@@ -871,9 +1008,9 @@ def update_usage_metrics(parsed_data, params, latency, result=None, error=None, 
         "apikey_object_id": params.get('apikey_object_id'),
         "expectedCost": parsed_data['tokens'].get('total_cost', 0),
         "variables": parsed_data.get('variables') or {},
-        "outputTokens": result.get('response', {}).get('usage', {}).get('output_tokens', 0) or 0 if result else 0,
-        "inputTokens": result.get('response', {}).get('usage', {}).get('input_tokens', 0) or 0 if result else 0,
-        "total_tokens": result.get('response', {}).get('usage', {}).get('total_tokens', 0) or 0 if result else 0
+        "outputTokens": output_tokens,
+        "inputTokens": input_tokens,
+        "total_tokens": total_tokens
     }
 
     # Add success-specific fields
