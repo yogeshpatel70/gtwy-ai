@@ -49,11 +49,13 @@ async def OpenAIImageModel(configuration, apiKey, execution_time_logs, timer):
                 if "b64_json" in response["data"][i]:
                     del response["data"][i]["b64_json"]
             else:
-                raise ValueError(
-                    f"Image data contains neither 'url' nor 'b64_json' key. Available keys: {list(image_data.keys())}"
-                )
-
-        return {"success": True, "response": response}
+                raise ValueError(f"Image data contains neither 'url' nor 'b64_json' key. Available keys: {list(image_data.keys())}")
+        
+        response['usage']['total_images_generated'] = len(response['data'])
+        return {
+            'success': True,
+            'response': response
+        }
     except Exception as error:
         execution_time_logs.append(
             {"step": "OpenAI image Processing time", "time_taken": timer.stop("OpenAI image Processing time")}
