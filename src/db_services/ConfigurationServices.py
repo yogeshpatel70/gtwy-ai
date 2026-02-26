@@ -179,16 +179,17 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
                                 "apikey_usage": {"$ifNull": ["$apikey_usage", 0]},
                                 "apikey_limit_reset_period": {"$ifNull": ["$apikey_limit_reset_period", "monthly"]},
                                 "apikey_limit_start_date": {"$ifNull": ["$apikey_limit_start_date", None]},
+                                "status": {"$ifNull": ["$status", None]},
                             }
                         },
                     ],
                     "as": "apikeys_docs",
                 }
             },
-            # Stage 5: Map each service to its corresponding apikey, handling empty case
+            # Stage 5: Single-pass map — build apikeys_combined with apikey, limit, usage and status together
             {
                 "$addFields": {
-                    "apikeys": {
+                    "apikeys_combined": {
                         "$cond": [
                             {"$gt": [{"$size": "$apikeys_array"}, 0]},
                             {
@@ -228,6 +229,7 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
                                                                 "apikey_usage": "$$matched_doc.apikey_usage",
                                                                 "apikey_limit_reset_period": "$$matched_doc.apikey_limit_reset_period",
                                                                 "apikey_limit_start_date": "$$matched_doc.apikey_limit_start_date",
+                                                                "status": "$$matched_doc.status",
                                                             },
                                                         }
                                                     },
@@ -240,7 +242,7 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
                             },
                             {},
                         ]
-                    }
+                    },
                 }
             },
             # Stage 6: Lookup 'pre_tools' data from 'apicalls' collection using the ObjectIds in 'pre_tools'
@@ -440,6 +442,11 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
 
         bridge_data = result[0]
 
+        # Split apikeys_combined into apikeys and apikey_status
+        combined = bridge_data.pop("apikeys_combined", {})
+        bridge_data["apikeys"] = {k: {ek: ev for ek, ev in v.items() if ek != "status"} for k, v in combined.items()}
+        bridge_data["apikey_status"] = {k: v.get("status") for k, v in combined.items()}
+
         # Check if folder_id is present and fetch folder API keys
         if bridge_data.get("folder_id"):
             folder_pipeline = [
@@ -540,6 +547,7 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
                                                             "apikey_usage": {"$ifNull": ["$$matched.apikey_usage", 0]},
                                                             "apikey_limit_reset_period": {"$ifNull": ["$$matched.apikey_limit_reset_period", "monthly"]},
                                                             "apikey_limit_start_date": {"$ifNull": ["$$matched.apikey_limit_start_date", None]},
+                                                            "status": {"$ifNull": ["$$matched.status", None]},
                                                         },
                                                     }
                                                 },
@@ -692,8 +700,12 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
 
             # Append folder_apikeys to bridge_data if found
             if folder_result and folder_result[0].get("folder_apikeys"):
-                bridge_data["folder_apikeys"] = folder_result[0]["folder_apikeys"]
-                bridge_data["apikey_object_id"] = folder_result[0]["apikey_object_id"]
+                folder_data = folder_result[0]
+                # Split status out of folder_apikeys
+                raw = folder_data["folder_apikeys"]
+                bridge_data["folder_apikeys"] = {k: {ek: ev for ek, ev in v.items() if ek != "status"} for k, v in raw.items()}
+                bridge_data["apikey_status"] = {k: v.get("status") for k, v in raw.items()}
+                bridge_data["apikey_object_id"] = folder_data["apikey_object_id"]
             else:
                 bridge_data["folder_apikeys"] = {}
 
