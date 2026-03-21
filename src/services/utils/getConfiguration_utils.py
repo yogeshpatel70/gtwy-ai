@@ -50,21 +50,12 @@ def setup_configuration(configuration, result, service):
     folder_id = result.get("bridges", {}).get("folder_id")
 
     if folder_id is not None and isinstance(prompt, dict):
-        use_default = prompt.get("useDefaultPrompt")
+        use_default = prompt.get("customPrompt")
         if use_default is None or use_default is True:
            db_configuration["prompt"] = convert_prompt_to_string(prompt)
         else:
             prompt_str = prompt.get("customPrompt")
-            embed_fields = prompt.get("embedFields", [])
-            field_values = {}
-            for field in embed_fields:
-                if isinstance(field, dict):
-                    label = field.get("label") or field.get("name")
-                    value = field.get("value")
-                    if label and value:
-                        field_values[label] = value
-
-            prompt_str, _ = Helper.replace_variables_in_prompt(prompt_str, field_values)
+            prompt_str, _ = Helper.replace_variables_in_prompt(prompt_str, prompt)
             db_configuration["prompt"] = prompt_str
 
     elif isinstance(prompt, dict):
@@ -354,35 +345,6 @@ def add_web_crawling_tool(tools, tool_id_and_name_mapping, built_in_tools, gtwy_
         "type": inbuild_tools["Gtwy_Web_Search"],
         "name": inbuild_tools["Gtwy_Web_Search"],
     }
-
-
-def add_anthropic_json_schema(service, configuration, tools):
-    """Add JSON schema response format for Anthropic service"""
-    if (
-        service != "anthropic"
-        or not isinstance(configuration.get("response_type"), dict)
-        or not configuration["response_type"].get("json_schema")
-    ):
-        return
-
-    # Remove required field if it exists
-    if configuration["response_type"]["json_schema"].get("required") is not None:
-        del configuration["response_type"]["json_schema"]["required"]
-
-    # Add JSON schema tool
-    tools.append(
-        {
-            "name": "JSON_Schema_Response_Format",
-            "description": "return the response in json schema format",
-            "input_schema": configuration.get("response_type").get("json_schema").get("schema"),
-        }
-    )
-
-    # Update configuration
-    configuration["response_type"] = "default"
-    configuration["prompt"] += (
-        "\n Always return the response in JSON SChema by calling the function JSON_Schema_Response_Format and if no values available then return json with dummy or default vaules"
-    )
 
 
 def add_connected_agents(result, tools, tool_id_and_name_mapping, orchestrator_flag):
