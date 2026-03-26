@@ -425,6 +425,12 @@ async def manage_threads(parsed_data):
     if thread_id:
         thread_id = thread_id.strip()
 
+        # Ensure sub_thread_id is set when thread_id exists but sub_thread_id is missing
+        # This handles A2A calls where parent passes thread_id but child's sub_thread_id may be None
+        if not sub_thread_id:
+            sub_thread_id = thread_id
+            parsed_data["sub_thread_id"] = sub_thread_id
+
         # Check Redis cache first for conversations
         version_id = parsed_data.get("version_id", "")
         redis_key = f"conversation_{version_id}_{thread_id}_{sub_thread_id}"
