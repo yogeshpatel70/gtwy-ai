@@ -581,8 +581,7 @@ def build_service_params(
         "bridge_id": parsed_data["bridge_id"],
         "bridge": parsed_data["bridge"],
         "thread_id": thread_info["thread_id"] if thread_info else parsed_data["thread_id"],
-        # Fallback: use thread_id as sub_thread_id if sub_thread_id is null/None
-        "sub_thread_id": (thread_info["sub_thread_id"] if thread_info else parsed_data["sub_thread_id"]) or (thread_info["thread_id"] if thread_info else parsed_data["thread_id"]),
+        "sub_thread_id": thread_info["sub_thread_id"] if thread_info else parsed_data["sub_thread_id"],
         "model": parsed_data["model"],
         "service": parsed_data["service"],
         "modelOutputConfig": model_output_config,

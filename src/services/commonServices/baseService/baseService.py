@@ -345,8 +345,7 @@ class BaseService:
             original_message = f"Query is successfully transferred to agent {agent_name}"
         return {
             "thread_id": self.thread_id,
-            # Fallback: use thread_id as sub_thread_id if sub_thread_id is null/None
-            "sub_thread_id": self.sub_thread_id or self.thread_id,
+            "sub_thread_id": self.sub_thread_id,
             "user": self.original_user or "",
             "message": original_message,
             "reasoning": reasoning,
