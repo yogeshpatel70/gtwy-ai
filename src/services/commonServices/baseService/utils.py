@@ -365,7 +365,8 @@ async def process_data_and_run_tools(codes_mapping, self):
                     # Add thread_id and sub_thread_id if bridge requires it
                     if self.tool_id_and_name_mapping[name].get("requires_thread_id", False):
                         agent_args["thread_id"] = self.thread_id
-                        agent_args["sub_thread_id"] = self.sub_thread_id
+                        # Fallback: use thread_id as sub_thread_id if sub_thread_id is null/None
+                        agent_args["sub_thread_id"] = self.sub_thread_id or self.thread_id
                     if self.tool_id_and_name_mapping[name].get("version_id", False):
                         agent_args["version_id"] = self.tool_id_and_name_mapping[name].get("version_id")
 
