@@ -116,3 +116,4 @@ opentelemetry-instrumentation-asgi
 opentelemetry-instrumentation-httpx
 notdiamond
 pytz
+package>=2.0.0
