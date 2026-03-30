@@ -1,7 +1,7 @@
 FROM python:3.13
 WORKDIR /app
 COPY ./req.txt /app/req.txt
-RUN pip install --upgrade pip
+RUN pip install --upgrade pip setuptools
 RUN pip install --trusted-host --no-cache-dir -r req.txt
 COPY . /app
 EXPOSE 8080
