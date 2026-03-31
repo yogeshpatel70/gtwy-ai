@@ -1064,8 +1064,8 @@ def validate_json_schema_configuration(configuration):
         except (json.JSONDecodeError, TypeError):
             return False, "json_schema should be a valid JSON"
 
-    # If json_schema key is not present, it's valid (allowed case)
-    return True, None
+    # If json_schema key is not present, it's an error — APIs require the schema body when type is json_schema
+    return False, "json_schema field is required when response_type.type is 'json_schema'"
 
 
 def create_latency_object(timer, params):

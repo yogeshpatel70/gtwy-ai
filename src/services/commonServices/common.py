@@ -37,6 +37,7 @@ from src.services.utils.common_utils import (
     process_background_tasks_for_playground,
     process_variable_state,
     restructure_json_schema,
+    validate_json_schema_configuration,
     send_error,
     setup_agent_pre_tools,
     update_usage_metrics,
@@ -247,6 +248,10 @@ async def chat(request_body):
             bridge_configurations,
         )
         # Step 10: json_schema service conversion
+        is_valid_schema, schema_error = validate_json_schema_configuration(custom_config)
+        if not is_valid_schema:
+            raise ValueError(schema_error)
+
         if "response_type" in custom_config and isinstance(custom_config["response_type"], dict) and custom_config["response_type"].get("type") == "json_schema":
             custom_config["response_type"] = restructure_json_schema(
                 custom_config["response_type"], parsed_data["service"]
