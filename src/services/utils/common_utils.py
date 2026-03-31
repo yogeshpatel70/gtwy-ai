@@ -6,14 +6,18 @@ from typing import Any
 from src.services.utils.built_in_tools.firecrawl import call_firecrawl_scrape
 from src.controllers.rag_controller import get_text_from_vectorsQuery
 from src.services.utils.ai_call_util import call_ai_middleware
-from src.configs.constant import bridge_ids
 from config import Config
 from globals import TRANSFER_HISTORY, BadRequestException, logger, try_catch
 from src.configs.model_configuration import model_config_document
 from src.configs.serviceKeys import model_config_change
 from src.controllers.conversationController import save_sub_thread_id_and_name
-from src.db_services.metrics_service import create, create_orchestrator
-from src.services.cache_service import find_in_cache, make_json_serializable
+from src.db_services.metrics_service import (
+    build_history_and_metrics_payload,
+    build_orchestrator_log_data,
+    save_conversations_to_redis,
+)
+from src.services.cache_service import find_in_cache, store_in_cache, make_json_serializable
+from src.configs.constant import bridge_ids, redis_keys
 from src.services.commonServices.baseService.utils import axios_work, make_request_data_and_publish_sub_queue
 from src.services.commonServices.queueService.queueLogService import sub_queue_obj
 from src.services.proxy.Proxyservice import get_timezone_and_org_name
@@ -165,7 +169,7 @@ def parse_request_body(request_body):
         "pre_tools": body.get("pre_tools"),
         "version": state.get("version"),
         "fine_tune_model": body.get("configuration", {}).get("fine_tune_model", {}).get("current_model", {}),
-        "is_rich_text": body.get("configuration", {}).get("is_rich_text", True),
+        "is_rich_text": body.get("configuration", {}).get("is_rich_text", False),
         "actions": body.get("actions", {}),
         "user_reference": body.get("user_reference", ""),
         "variables_path": body.get("variables_path") or {},
@@ -421,6 +425,12 @@ async def manage_threads(parsed_data):
     if thread_id:
         thread_id = thread_id.strip()
 
+        # Ensure sub_thread_id is set when thread_id exists but sub_thread_id is missing
+        # This handles A2A calls where parent passes thread_id but child's sub_thread_id may be None
+        if not sub_thread_id:
+            sub_thread_id = thread_id
+            parsed_data["sub_thread_id"] = sub_thread_id
+
         # Check Redis cache first for conversations
         version_id = parsed_data.get("version_id", "")
         redis_key = f"conversation_{version_id}_{thread_id}_{sub_thread_id}"
@@ -615,6 +625,42 @@ def build_service_params(
     }
 
 
+async def _publish_history_to_queue(dataset, history_params, version_id, thread_info=None):
+    """Build history/metrics payload and publish it to the log queue for Node.js to save."""
+    try:
+        payload = build_history_and_metrics_payload(dataset, history_params, version_id)
+        message = make_json_serializable({"save_history": [payload]})
+        await sub_queue_obj.publish_message(message)
+    except Exception as err:
+        logger.error(f"Error publishing history to queue: {str(err)}")
+
+
+async def _update_history_redis(dataset, history_params, version_id, thread_info):
+    """
+    Handle Python-side Redis updates after history data is built.
+    Keeps conversation cache and token count cache in sync.
+    """
+    if thread_info is None:
+        thread_info = {}
+
+    thread_id = thread_info.get("thread_id")
+    sub_thread_id = thread_info.get("sub_thread_id")
+    conversations = thread_info.get("result", [])
+
+    if dataset and "error" not in dataset[0] and conversations:
+        await save_conversations_to_redis(conversations, version_id, thread_id, sub_thread_id, history_params)
+
+    if history_params and history_params.get("bridge_id"):
+        cache_key = f"{redis_keys['metrix_bridges_']}{history_params['bridge_id']}"
+        cache_value = await find_in_cache(cache_key)
+        try:
+            old_total = json.loads(cache_value) if cache_value else 0
+        except (json.JSONDecodeError, TypeError):
+            old_total = 0
+        total_tokens = sum(d.get("total_tokens", 0) for d in (dataset or [])) + old_total
+        await store_in_cache(cache_key, float(total_tokens))
+
+
 async def process_background_tasks(
     parsed_data, result, params, thread_info, transfer_request_id=None, bridge_configurations=None
 ):
@@ -622,24 +668,23 @@ async def process_background_tasks(
     Process background tasks for saving history and publishing to queue.
     Handles both regular flow and transfer chain scenarios.
     Also handles orchestrator mode where multiple agents are saved in a single entry.
+    History and metrics are now published to the log queue for Node.js to save to DB.
     """
-    # Check if orchestrator_flag is enabled (from body or parsed_data)
     orchestrator_flag = parsed_data.get("orchestrator_flag") or parsed_data.get("body", {}).get("orchestrator_flag")
 
-    # Check if this is part of a transfer chain
     is_transfer_chain = (
         transfer_request_id
         and transfer_request_id in TRANSFER_HISTORY
         and len(TRANSFER_HISTORY[transfer_request_id]) > 0
     )
 
+    history_entries = []
+    orchestrator_history_data = None
+
     if is_transfer_chain:
-        # This is the final agent in a transfer chain
-        # Get the correct version_id from bridge_configurations for the final agent
         bridge_configs = bridge_configurations or {}
         final_version_id = bridge_configs.get(parsed_data["bridge_id"], {}).get("version_id", parsed_data["version_id"])
 
-        # Add current agent's history
         current_history_data = {
             "bridge_id": parsed_data["bridge_id"],
             "history_params": result.get("historyParams"),
@@ -650,12 +695,9 @@ async def process_background_tasks(
         }
         TRANSFER_HISTORY[transfer_request_id].append(current_history_data)
 
-        # Save all transfer history (each agent in the chain)
         transfer_chain = TRANSFER_HISTORY[transfer_request_id]
 
-        # If orchestrator_flag is true, save all agents in a single orchestrator entry
         if orchestrator_flag:
-            # Update history_params with prompts from bridge_configurations
             for _idx, history_entry in enumerate(transfer_chain):
                 if history_entry["history_params"]:
                     agent_bridge_id = history_entry["bridge_id"]
@@ -663,31 +705,31 @@ async def process_background_tasks(
                         agent_config = bridge_configs[agent_bridge_id].get("configuration", {})
                         history_entry["history_params"]["prompt"] = agent_config.get("prompt")
 
-            # Save all agents in a single orchestrator entry
-            asyncio.create_task(create_orchestrator(transfer_chain, thread_info))
+            orchestrator_history_data = build_orchestrator_log_data(transfer_chain, thread_info)
         else:
-            # Regular transfer chain - save each agent separately
             for idx, history_entry in enumerate(transfer_chain):
-                # Update parent_id and child_id in history_params based on chain position
                 if history_entry["history_params"]:
-                    # Set parent_id from the previous entry's bridge_id
                     history_entry["history_params"]["parent_id"] = history_entry.get("parent_id", "")
 
-                    # Set child_id from the next entry's bridge_id (None if last in chain)
                     if idx < len(transfer_chain) - 1:
                         history_entry["history_params"]["child_id"] = transfer_chain[idx + 1]["bridge_id"]
                     else:
                         history_entry["history_params"]["child_id"] = None
 
-                    # Add prompt from bridge_configurations if available
                     agent_bridge_id = history_entry["bridge_id"]
                     if bridge_configs and agent_bridge_id in bridge_configs:
                         agent_config = bridge_configs[agent_bridge_id].get("configuration", {})
                         history_entry["history_params"]["prompt"] = agent_config.get("prompt")
 
-                # Save history to database
+                payload = build_history_and_metrics_payload(
+                    history_entry["dataset"],
+                    history_entry["history_params"],
+                    history_entry["version_id"],
+                )
+                history_entries.append(payload)
+
                 asyncio.create_task(
-                    create(
+                    _update_history_redis(
                         history_entry["dataset"],
                         history_entry["history_params"],
                         history_entry["version_id"],
@@ -695,28 +737,40 @@ async def process_background_tasks(
                     )
                 )
 
-        # Clean up transfer history
         del TRANSFER_HISTORY[transfer_request_id]
     else:
-        # Regular flow (no transfer or first agent that didn't transfer)
-        # Always set parent_id and child_id in history_params for consistency
         if result.get("historyParams"):
             result["historyParams"]["parent_id"] = parsed_data.get("parent_bridge_id", "")
             result["historyParams"]["child_id"] = None
 
-        # Save single history entry
+        payload = build_history_and_metrics_payload(
+            [parsed_data["usage"]],
+            result["historyParams"],
+            parsed_data["version_id"],
+        )
+        history_entries.append(payload)
+
         asyncio.create_task(
-            create([parsed_data["usage"]], result["historyParams"], parsed_data["version_id"], thread_info)
+            _update_history_redis(
+                [parsed_data["usage"]],
+                result["historyParams"],
+                parsed_data["version_id"],
+                thread_info,
+            )
         )
 
-    # Publish to queue (for both transfer and non-transfer cases)
     data = await make_request_data_and_publish_sub_queue(parsed_data, result, params, thread_info)
+
+    if history_entries:
+        data["save_history"] = history_entries
+    if orchestrator_history_data:
+        data["save_orchestrator_history"] = orchestrator_history_data
+
     data = make_json_serializable(data)
     await sub_queue_obj.publish_message(data)
 
 
 async def process_background_tasks_for_error(parsed_data, error):
-    # Combine the tasks into a single asyncio.gather call
     tasks = [
         send_alert(
             data={
@@ -730,7 +784,9 @@ async def process_background_tasks_for_error(parsed_data, error):
                 "org_id": parsed_data["org_id"],
             }
         ),
-        create([parsed_data["usage"]], parsed_data["historyParams"], parsed_data["version_id"]),
+        _publish_history_to_queue(
+            [parsed_data["usage"]], parsed_data["historyParams"], parsed_data["version_id"]
+        ),
         save_sub_thread_id_and_name(
             parsed_data["thread_id"],
             parsed_data["sub_thread_id"],
@@ -741,7 +797,6 @@ async def process_background_tasks_for_error(parsed_data, error):
             parsed_data["user"],
         ),
     ]
-    # Filter out None values
     await asyncio.gather(*[task for task in tasks if task is not None], return_exceptions=True)
 
 
@@ -793,6 +848,10 @@ async def process_batch_background_tasks(parsed_data, result, processed_prompts,
         await asyncio.gather(*tasks, return_exceptions=True)
 
 def build_service_params_for_batch(parsed_data, custom_config, model_output_config):
+
+    # Temporary fix for batch - stream bug
+    custom_config.pop("stream", None)
+
     return {
         "customConfig": custom_config,
         "configuration": parsed_data["configuration"],
@@ -1005,8 +1064,8 @@ def validate_json_schema_configuration(configuration):
         except (json.JSONDecodeError, TypeError):
             return False, "json_schema should be a valid JSON"
 
-    # If json_schema key is not present, it's valid (allowed case)
-    return True, None
+    # If json_schema key is not present, it's an error — APIs require the schema body when type is json_schema
+    return False, "json_schema field is required when response_type.type is 'json_schema'"
 
 
 def create_latency_object(timer, params):
@@ -1231,3 +1290,184 @@ async def update_cost_usage_and_apikey_status_in_background(original_service, pa
     if completion_success:
         asyncio.create_task(update_cost_and_last_used(parsed_data))
     asyncio.create_task(mark_apikey_status_from_response(original_service, parsed_data, code))
+
+
+async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_info, transfer_request_id, bridge_configurations, request_body=None, chat_function=None):
+    import traceback as tb
+    original_service = parsed_data["service"]
+    original_model = parsed_data["model"]
+    timer.start()
+    original_error = None
+
+    try:
+        from src.services.commonServices.response_caching_service import handle_response_caching
+        result = await handle_response_caching(parsed_data=parsed_data, class_obj=class_obj)
+
+    except Exception as first_err:
+        original_error = str(first_err)
+        logger.error(f"SSE first attempt failed ({original_service}/{original_model}): {original_error}, {tb.format_exc()}")
+        fall_back = parsed_data.get("fall_back")
+
+        if fall_back and fall_back.get("is_enable", False):
+            try:
+                parsed_data["model"] = fall_back.get("model", parsed_data["model"])
+                parsed_data["service"] = fall_back.get("service", parsed_data["service"])
+                parsed_data["configuration"]["model"] = fall_back.get("model")
+
+                if parsed_data["service"] != original_service:
+                    parsed_data["apikey"] = fall_back.get("apikey") or (
+                        Config.AI_ML_APIKEY if fall_back.get("service") == "ai_ml" else None
+                    )
+                    fb_model_config, fb_custom_config, fb_model_output_config = await load_model_configuration(
+                        parsed_data["model"], parsed_data["configuration"], parsed_data["service"]
+                    )
+                    fb_custom_config = await configure_custom_settings(
+                        fb_model_config["configuration"], fb_custom_config, parsed_data["service"]
+                    )
+                    fallback_params = build_service_params(
+                        parsed_data,
+                        fb_custom_config,
+                        fb_model_output_config,
+                        thread_info,
+                        timer,
+                        params.get("memory"),
+                        params.get("send_error_to_webhook"),
+                        bridge_configurations,
+                    )
+                    fallback_class_obj = await Helper.create_service_handler(fallback_params, parsed_data["service"])
+                else:
+                    fallback_class_obj = class_obj
+                    fallback_class_obj.model = parsed_data["model"]
+                    if fall_back.get("apikey"):
+                        fallback_class_obj.apikey = fall_back["apikey"]
+                    fallback_params = params
+
+                # Transfer the live streamer so the same SSE queue/RTLayer channel is reused
+                fallback_class_obj.streamer = class_obj.streamer
+                fallback_class_obj.stream_mode = True
+
+                from src.services.commonServices.response_caching_service import handle_response_caching
+                result = await handle_response_caching(parsed_data=parsed_data, class_obj=fallback_class_obj)
+
+                if result.get("response", {}).get("data") is not None:
+                    result["response"]["data"]["fallback"] = True
+                    result["response"]["data"]["firstAttemptError"] = (
+                        f"Original attempt failed with {original_service}/{original_model}: {original_error}. "
+                        f"Retried with {parsed_data['service']}/{parsed_data['model']}"
+                    )
+
+                class_obj = fallback_class_obj
+                params = fallback_params
+
+            except Exception as retry_err:
+                logger.error(f"SSE fallback attempt also failed ({parsed_data['service']}/{parsed_data['model']}): {retry_err}, {tb.format_exc()}")
+                if class_obj.streamer:
+                    await class_obj.streamer.emit_error(original_error, fallback_error=str(retry_err))
+                    await class_obj.streamer.close()
+                return
+        else:
+            if class_obj.streamer:
+                await class_obj.streamer.emit_error(original_error)
+                await class_obj.streamer.close()
+            return
+
+    # Handle agent transfer: save agent A's metrics/history, then fire agent B with the live streamer
+    transfer_agent_config = result.get("transfer_agent_config") if isinstance(result, dict) else None
+    if transfer_agent_config and transfer_agent_config.get("action_type") == "transfer" and chat_function and request_body:
+        try:
+            result["response"]["usage"] = params["token_calculator"].get_total_usage()
+            if parsed_data.get("type") != "image":
+                parsed_data["tokens"] = params["token_calculator"].calculate_total_cost(
+                    parsed_data["model"], parsed_data["service"]
+                )
+                result["response"]["usage"]["cost"] = parsed_data["tokens"].get("total_cost") or 0
+
+            current_version_id = bridge_configurations.get(parsed_data["bridge_id"], {}).get(
+                "version_id", parsed_data.get("version_id")
+            )
+            latency = create_latency_object(timer, params)
+            update_usage_metrics(parsed_data, params, latency, result=result, success=True)
+
+            current_history_data = {
+                "bridge_id": parsed_data["bridge_id"],
+                "history_params": result.get("historyParams"),
+                "dataset": [parsed_data.get("usage", {})],
+                "version_id": current_version_id,
+                "thread_info": thread_info,
+                "parent_id": parsed_data.get("parent_bridge_id", ""),
+            }
+            TRANSFER_HISTORY[transfer_request_id].append(current_history_data)
+
+            target_agent_id = transfer_agent_config.get("agent_id")
+            user_query = transfer_agent_config.get("user_query")
+
+            if target_agent_id and target_agent_id in bridge_configurations:
+                target_agent_cfg = bridge_configurations[target_agent_id]
+                transfer_body = request_body.get("body", {}).copy()
+                transfer_body.update(target_agent_cfg)
+                transfer_body["bridge_id"] = target_agent_id
+                transfer_body["user"] = user_query
+                transfer_body["parent_bridge_id"] = parsed_data["bridge_id"]
+                transfer_body["transfer_request_id"] = transfer_request_id
+                transfer_body["bridge_configurations"] = bridge_configurations
+                # Inject the live streamer so agent B writes to the same SSE connection
+                transfer_body["_injected_streamer"] = class_obj.streamer
+
+                transfer_request_body = {
+                    "body": transfer_body,
+                    "state": request_body.get("state", {}).copy(),
+                    "path_params": request_body.get("path_params", {}),
+                }
+                await chat_function(transfer_request_body)
+            else:
+                logger.warning(f"SSE transfer: target agent {target_agent_id} not found, closing stream")
+                if class_obj.streamer:
+                    await class_obj.streamer.emit_error(f"Transfer target agent {target_agent_id} not found in bridge_configurations")
+                    await class_obj.streamer.close()
+        except Exception as transfer_err:
+            logger.error(f"SSE transfer handling error: {transfer_err}, {tb.format_exc()}")
+            if class_obj.streamer:
+                await class_obj.streamer.emit_error(str(transfer_err))
+                await class_obj.streamer.close()
+        return  # Agent B owns emit_done + close from here
+
+    try:
+        result["response"]["usage"] = params["token_calculator"].get_total_usage()
+        if parsed_data.get("type") != "image":
+            parsed_data["tokens"] = params["token_calculator"].calculate_total_cost(
+                parsed_data["model"], parsed_data["service"]
+            )
+            result["response"]["usage"]["cost"] = parsed_data["tokens"].get("total_cost") or 0
+        params["execution_time_logs"].append({"step": "streaming", "time_taken": round(timer.stop("streaming"), 4)})
+        latency = create_latency_object(timer, params)
+        if not parsed_data["is_playground"]:
+            if result.get("response") and result["response"].get("data"):
+                result["response"]["data"]["message_id"] = parsed_data["message_id"]
+            update_usage_metrics(parsed_data, params, latency, result=result, success=True)
+            await process_background_tasks(
+                parsed_data, result, params, thread_info, transfer_request_id, bridge_configurations
+            )
+        else:
+            await process_background_tasks_for_playground(result, parsed_data)
+
+        if class_obj.streamer:
+            model_response = result.get("modelResponse", {}) if isinstance(result, dict) else {}
+            formatted_response = result.get("response", {}) if isinstance(result, dict) else {}
+            finish_reason = (
+                result.get("stream_finish_reason")
+                or model_response.get("finish_reason")
+                or model_response.get("status")
+                or ""
+            )
+            await class_obj.streamer.emit_done(
+                usage=formatted_response.get("usage", {}),
+                message_id=str(parsed_data.get("message_id") or ""),
+                finish_reason=finish_reason,
+                accumulated_data=formatted_response,
+            )
+            await class_obj.streamer.close()
+    except Exception as err:
+        logger.error(f"SSE finalization error: {str(err)}, {tb.format_exc()}")
+        if class_obj.streamer:
+            await class_obj.streamer.emit_error(str(err))
+            await class_obj.streamer.close()

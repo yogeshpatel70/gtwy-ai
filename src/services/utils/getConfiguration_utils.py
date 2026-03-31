@@ -57,7 +57,6 @@ def setup_configuration(configuration, result, service):
             prompt_str = prompt.get("customPrompt")
             prompt_str, _ = Helper.replace_variables_in_prompt(prompt_str, prompt)
             db_configuration["prompt"] = prompt_str
-
     elif isinstance(prompt, dict):
         db_configuration["prompt"] = convert_prompt_to_string(prompt)
 
@@ -66,7 +65,7 @@ def setup_configuration(configuration, result, service):
 
 def setup_tool_choice(configuration, result, service):
     """Setup tool choice configuration"""
-    tool_choice_ids = configuration.get("tool_choice", [])
+    tool_choice_ids = configuration.get("tool_choice", "")
     toolchoice = None
 
     # Find tool choice from API calls
@@ -77,11 +76,10 @@ def setup_tool_choice(configuration, result, service):
             )
             break
     if not toolchoice:
-        connected_agents = result.get("bridges", {}).get("connected_agents", {})
-        for agent_name, agent_data in connected_agents.items():
-            if tool_choice_ids == agent_data["bridge_id"]:
-                toolchoice = makeFunctionName(agent_name)
-                break
+        connected_agents_name = result.get("bridges", {}).get("agent_name_info", {})
+        agent_name = connected_agents_name.get(tool_choice_ids)
+        if agent_name:
+            toolchoice = makeFunctionName(agent_name)
 
     # Find choice type
     found_choice = None
@@ -351,6 +349,7 @@ def add_connected_agents(result, tools, tool_id_and_name_mapping, orchestrator_f
     """Add connected agents as tools"""
     connected_agents = result.get("bridges", {}).get("connected_agents", {})
     connected_agent_details = result.get("bridges", {}).get("connected_agent_details", {})
+    agent_name_info = result.get("bridges", {}).get("agent_name_info", {})
 
     if not connected_agents:
         return
@@ -358,10 +357,9 @@ def add_connected_agents(result, tools, tool_id_and_name_mapping, orchestrator_f
     # Check if type is orchestrator
     is_orchestrator = orchestrator_flag or result.get("bridges", {}).get("orchestrator", False)
 
-    for bridge_name, bridge_info in connected_agents.items():
+    for _, bridge_info in connected_agents.items():
         bridge_id_value = bridge_info.get("bridge_id", "")
         version_id_value = bridge_info.get("version_id", "")
-
         # If version_id is present, use connected_agents data, otherwise use connected_agent_details
         if version_id_value:
             # Use data from connected_agents when version_id is present
@@ -384,7 +382,7 @@ def add_connected_agents(result, tools, tool_id_and_name_mapping, orchestrator_f
                 fields = variables.get("fields", {})
                 required_params = variables.get("required_params", [])
 
-        name = makeFunctionName(bridge_name)
+        name = makeFunctionName(agent_name_info.get(bridge_id_value, ""))
 
         # Build properties dictionary
         properties = {
