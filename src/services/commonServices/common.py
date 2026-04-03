@@ -478,7 +478,6 @@ async def chat(request_body):
         template_data = None
         if isinstance(response_type, dict) and response_type.get('is_template', False):
             try:
-                html_output = ""
                 template_ids = response_type.get('template_id', [])
                 if not template_ids:
                     logger.warning("Template Rendering: 'is_template' is True but 'template_id' is missing or empty.")
@@ -488,8 +487,7 @@ async def chat(request_body):
                     richui_templates = parsed_data.get('richui_templates', {})
 
                     # AI Result Data
-                    ai_data = result.get('response', {}).get('data', {})
-                    ai_data = json.loads(json.dumps(ai_data.get('content', ai_data)))
+                    ai_data = result.get('response', {}).get('data', {}).get('content', {})
                     # Unwrap 'item' if present
                     if isinstance(ai_data, dict) and "item" in ai_data:
                         ai_data = ai_data["item"]
