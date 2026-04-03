@@ -32,3 +32,4 @@ dump.rdb
 .venv
 /.venv
 .venv/
+.claude/
