@@ -15,9 +15,9 @@ async def validate_bridge(bridge_data, result):
     if not result.get("success"):
         return {"success": False, "error": "Agent does not exist in this organization"}
 
-    bridge_status = bridge_data.get("bridges", {}).get("bridge_status") or bridge_data.get("bridge_status", 0)
+    bridge_status = bridge_data.get("bridges", {}).get("bridge_status") or bridge_data.get("bridge_status")
     if bridge_status == 0:
-        raise Exception("Bridge is Currently Paused")
+        raise Exception("Agent is Currently Paused")
 
     return None
 
