@@ -103,6 +103,12 @@ class BaseService:
         else:
             self.streamer = None
 
+        self.stream_mode = params.get("customConfig", {}).get("stream") is True
+        if self.stream_mode:
+            self.streamer = StreamingService(mode="sse")
+        else:
+            self.streamer = None
+
     def aiconfig(self):
         return self.customConfig
 
