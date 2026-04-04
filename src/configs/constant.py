@@ -17,6 +17,7 @@ service_name = {
     "open_router": "open_router",
     "mistral": "mistral",
     "ai_ml": "ai_ml",
+    "deepgram": "deepgram",
     "openai_completion": "openai_completion",
 }
 
@@ -29,7 +30,6 @@ bridge_ids = {
     "structured_output_optimizer": "67766c4eec020b944b3e0670",
     "chatbot_response_with_actions": "67b3157bdd16f681b71b06a4",
     "chatbot_response_without_actions": "67b30d46f8ab2d672f1682b4",
-    "get_csv_query_type": "67c2f4b40ef03932ed9a2b40",
     "chatbot_suggestions": "674710c9141fcdaeb820aeb8",
     "generate_summary": "679ca9520a9b42277fd2a3c1",
     "function_agrs_using_ai": "67c81a424f3136bfb0e81906",
@@ -83,6 +83,7 @@ new_agent_service = {
     "gemini": "gemini-2.5-flash",
     "ai_ml": "gpt-oss-20b",
     "grok": "grok-4-fast",
+    "deepgram": "nova-3",
 }
 
 inbuild_tools = {"Gtwy_Web_Search": "Gtwy_Web_Search"}

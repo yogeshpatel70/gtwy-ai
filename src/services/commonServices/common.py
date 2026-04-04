@@ -53,6 +53,7 @@ from ..utils.helper import Helper
 from ..utils.send_error_webhook import send_error_to_webhook
 from .baseService.utils import sendResponse
 from .response_caching_service import handle_response_caching
+from workflow import execute_advanced_workflow
 
 app = FastAPI()
 configurationModel = db["configurations"]
@@ -256,6 +257,15 @@ async def chat(request_body):
             custom_config["response_type"] = restructure_json_schema(
                 custom_config["response_type"], parsed_data["service"]
             )
+        if parsed_data.get("mode") == "todo":
+            return await execute_advanced_workflow(
+                parsed_data=parsed_data,
+                bridge_configurations=bridge_configurations,
+                params=params,
+                timer=timer,
+                thread_info=thread_info,
+                transfer_request_id=transfer_request_id,
+            )
 
         # Execute with retry mechanism
         class_obj = await Helper.create_service_handler(params, parsed_data["service"])
@@ -430,6 +440,10 @@ async def chat(request_body):
             raise ValueError(result)
         # Add message_id to response
         result["response"]["data"]["message_id"] = parsed_data["message_id"]
+        if getattr(class_obj, 'tool_call_limit_error', None):
+            result["error"] = class_obj.tool_call_limit_error
+        if result.get("error"):
+            result["response"]["error"] = result["error"]
 
         if original_error:
             send_error(
@@ -464,7 +478,6 @@ async def chat(request_body):
         template_data = None
         if isinstance(response_type, dict) and response_type.get('is_template', False):
             try:
-                html_output = ""
                 template_ids = response_type.get('template_id', [])
                 if not template_ids:
                     logger.warning("Template Rendering: 'is_template' is True but 'template_id' is missing or empty.")
@@ -474,8 +487,7 @@ async def chat(request_body):
                     richui_templates = parsed_data.get('richui_templates', {})
 
                     # AI Result Data
-                    ai_data = result.get('response', {}).get('data', {})
-                    ai_data = json.loads(json.dumps(ai_data.get('content', ai_data)))
+                    ai_data = result.get('response', {}).get('data', {}).get('content', {})
                     # Unwrap 'item' if present
                     if isinstance(ai_data, dict) and "item" in ai_data:
                         ai_data = ai_data["item"]

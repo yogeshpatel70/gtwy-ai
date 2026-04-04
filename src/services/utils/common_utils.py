@@ -162,6 +162,7 @@ def parse_request_body(request_body):
         "template": body.get("template"),
         "response_format": body.get("configuration", {}).get("response_format"),
         "response_type": body.get("configuration", {}).get("response_type"),
+        "mode": body.get("mode"),
         "model": body.get("configuration", {}).get("model"),
         "auto_model_select": body.get("auto_model_select", False),
         "is_playground": state.get("is_playground") or body.get("is_playground") or False,
@@ -631,8 +632,27 @@ async def _publish_history_to_queue(dataset, history_params, version_id, thread_
         payload = build_history_and_metrics_payload(dataset, history_params, version_id)
         message = make_json_serializable({"save_history": [payload]})
         await sub_queue_obj.publish_message(message)
+
+        asyncio.create_task(_send_history_to_rt_layer(history_params))
+
     except Exception as err:
         logger.error(f"Error publishing history to queue: {str(err)}")
+
+
+async def _send_history_to_rt_layer(history_entry):
+    if not history_entry.get("bridge_id"):
+        return
+
+    org_id = str(history_entry.get("org_id") or "")
+    response_format_copy = {
+        "cred": {
+            "channel": org_id + "_" + (history_entry.get("bridge_id") or ""),
+            "apikey": Config.RTLAYER_AUTH,
+            "ttl": "1",
+        },
+        "type": "RTLayer",
+    }
+    await sendResponse(response_format_copy, history_entry, True)
 
 
 async def _update_history_redis(dataset, history_params, version_id, thread_info):
@@ -763,6 +783,12 @@ async def process_background_tasks(
 
     if history_entries:
         data["save_history"] = history_entries
+
+        asyncio.gather(
+            *(_send_history_to_rt_layer(history_entry) for history_entry in history_entries),
+            return_exceptions=True
+        )
+
     if orchestrator_history_data:
         data["save_orchestrator_history"] = orchestrator_history_data
 
@@ -1453,6 +1479,10 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
         if class_obj.streamer:
             model_response = result.get("modelResponse", {}) if isinstance(result, dict) else {}
             formatted_response = result.get("response", {}) if isinstance(result, dict) else {}
+            if getattr(class_obj, 'tool_call_limit_error', None):
+                result["error"] = class_obj.tool_call_limit_error
+            if result.get("error"):
+                formatted_response["error"] = result["error"]
             finish_reason = (
                 result.get("stream_finish_reason")
                 or model_response.get("finish_reason")
