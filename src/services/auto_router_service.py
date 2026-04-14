@@ -9,7 +9,6 @@ from src.services.utils.auto_router_utils import (
 )
 
 client = AsyncNotDiamond(api_key=Config.NOT_DIAMOND_API_KEY) if Config.NOT_DIAMOND_API_KEY else None
-logger.info(f"Notdiamond API KEY in SELECT MODEL: {Config.NOT_DIAMOND_API_KEY}")
 INTERNAL_TO_NOTDIAMOND_PROVIDER = {value: key for key, value in PROVIDER_NAME_OVERRIDES.items()}
 
 async def apply_auto_model_selection(parsed_data, timer):
