@@ -1,8 +1,10 @@
+import copy
 import hashlib
 import json
 import operator
 import re
 import traceback
+import uuid
 from datetime import datetime
 from functools import reduce
 
@@ -18,7 +20,6 @@ from src.configs.constant import VALID_RESPONSE_TYPES, agent_config_update_keys
 from src.configs.model_configuration import model_config_document
 
 from ...configs.constant import service_name
-from ..commonServices.AiMl.ai_ml_call import Ai_Ml
 from ..commonServices.anthropic.anthropic_batch import AnthropicBatch
 from ..commonServices.anthropic.anthropicCall import Anthropic
 from ..commonServices.baseService.utils import sendResponse
@@ -35,6 +36,7 @@ from ..commonServices.openAI.openai_completion_response import OpenaiCompletion
 from ..commonServices.openAI.openai_embedding_call import OpenaiEmbedding
 from ..commonServices.openAI.openai_response import OpenaiResponse
 from ..commonServices.openRouter.openRouter_call import OpenRouter
+from ..cache_service import make_json_serializable
 
 
 class Helper:
@@ -227,7 +229,7 @@ class Helper:
             ]:
                 if key == "response_format":
                     config[key] = db_config.get(
-                        key, response["configuration"].get(key, {"type": "default", "cred": {}})
+                        key, response["settings"].get(key, {"type": "default", "cred": {}})
                     )
                 elif key == "fine_tune_model":
                     config[key] = db_config.get(key, response["configuration"].get(key, {}))
@@ -273,8 +275,6 @@ class Helper:
             class_obj = OpenRouter(params)
         elif service == service_name["mistral"]:
             class_obj = Mistral(params)
-        elif service == service_name["ai_ml"]:
-            class_obj = Ai_Ml(params)
         elif service == service_name["deepgram"]:
             class_obj = Deepgram(params)
         elif service == service_name["openai_completion"]:
@@ -292,7 +292,7 @@ class Helper:
         if modelObj is None:
             raise AttributeError(f"Model function '{model}' not found in model_configuration.")
 
-        if service in ["openai", "groq", "grok", "ai_ml", "openai_completion"]:
+        if service in ["openai", "groq", "grok", "openai_completion"]:
             token_cost["input_cost"] = modelObj["outputConfig"]["usage"][0]["total_cost"].get("input_cost") or 0
             token_cost["output_cost"] = modelObj["outputConfig"]["usage"][0]["total_cost"].get("output_cost") or 0
             token_cost["cache_cost"] = modelObj["outputConfig"]["usage"][0]["total_cost"].get("cached_cost") or 0
@@ -553,3 +553,65 @@ class Helper:
         
         if user_message := response_data.get(agent_config_update_keys["_user_message"]):
             parsed_data["user"] = user_message
+
+
+def build_rerun_queue_message(log, data_to_send):
+    """Build an independent queue message for a single rerun from the conversation log."""
+    body = copy.deepcopy(data_to_send.get("body", {}))
+    original_thread_id = log.get("thread_id")
+    original_sub_thread_id = log.get("sub_thread_id")
+    rerun_suffix = uuid.uuid4().hex[:8]
+    rerun_thread_base = original_thread_id or original_sub_thread_id or "thread"
+    rerun_sub_thread_base = original_sub_thread_id or original_thread_id or "subthread"
+
+    body.update({
+        "user": log["user"],
+        "message_id": str(uuid.uuid1()),
+        "thread_id": f"rerun_{rerun_thread_base}_{rerun_suffix}",
+        "sub_thread_id": f"rerun_{rerun_sub_thread_base}_{rerun_suffix}",
+        "variables": log.get("variables") or {},
+        "user_urls": log.get("user_urls") or [],
+        "is_rerun": True,
+        "original_message_id": log["message_id"],
+        "original_thread_id": original_thread_id,
+        "original_sub_thread_id": original_sub_thread_id,
+    })
+    body.setdefault("settings", {}).update({"response_format": {"type": "default"}, "stream": False})
+    return {"body": body, "state": data_to_send.get("state", {}), "path_params": data_to_send.get("path_params", {})}
+
+
+async def queue_rerun_messages(data_to_send, queue_obj, org_id, message_ids=None, bridge_id=None, thread_id=None, sub_thread_id=None):
+    """
+    Fetch conversation logs and publish rerun messages to the queue.
+
+    By message_ids: reruns each specified message.
+    By thread_id + sub_thread_id: fetches last 6 conversations, reruns the most recent one.
+
+    Returns:
+        Dict with keys: queued (list), not_found (list), conversations (list, thread mode only).
+    """
+    from src.db_services.conversationDbService import find_rerun_logs
+
+    logs_map, conversations = await find_rerun_logs(
+        org_id, message_ids=message_ids, bridge_id=bridge_id,
+        thread_id=thread_id, sub_thread_id=sub_thread_id,
+    )
+
+    queued, not_found = [], []
+    ids_to_process = message_ids if message_ids else list(logs_map.keys())
+
+    for mid in ids_to_process:
+        log = logs_map.get(mid)
+        if not log:
+            not_found.append(mid)
+            continue
+        msg = build_rerun_queue_message(log, data_to_send)
+        # For thread-based rerun, attach conversations as explicit history
+        if conversations:
+            serialized_conversations = make_json_serializable(conversations)
+            msg["body"].setdefault("configuration", {})["conversation"] = serialized_conversations
+        await queue_obj.publish_message(msg)
+        queued.append(mid)
+
+    return {"queued": queued, "not_found": not_found, "conversations": conversations}
+

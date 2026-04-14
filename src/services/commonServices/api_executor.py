@@ -1,11 +1,9 @@
+import asyncio
 import copy
 import traceback
 from src.configs.constant import service_name
 from src.services.commonServices.baseService.utils import serialize_config
-from ..utils.ai_middleware_format import send_alert
 from src.exceptions import ApiCallError
-
-
 
 
 async def execute_api_call(
@@ -22,6 +20,11 @@ async def execute_api_call(
     service="",
     count=0,
     token_calculator=None,
+    is_embed=None,
+    user_id=None,
+    thread_id=None,
+    is_playground=None,
+    api_collection=None,
 ):
     try:
         # Start timer
@@ -49,18 +52,23 @@ async def execute_api_call(
 
             # Send alert if required (even on failure)
             if alert_on_retry:
-                await send_alert(
-                    data={
-                        "org_name": org_name,
-                        "bridge_name": name,
-                        "configuration": serialize_config(configuration),
-                        "message_id": message_id,
-                        "bridge_id": bridge_id,
-                        "org_id": org_id,
-                        "message": "API call failed - no retry attempted",
-                        "error": result.get("error"),
-                    }
-                )
+                from src.send_alert import send_alert
+                from src.configs.constant import alert_types
+                asyncio.create_task(send_alert(
+                    bridge_id=bridge_id,
+                    org_id=org_id,
+                    error_log={"error": result.get("error"), "message": "Exception for the code", "message_id": message_id},
+                    error_type=alert_types["error"],
+                    bridge_name=name,
+                    org_name=org_name,
+                    is_embed=is_embed,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    service=service,
+                    is_playground=is_playground,
+                    api_collection=api_collection,
+                    is_external_error=False,
+                ))
 
             return result
 
@@ -82,10 +90,9 @@ async def check_space_issue(response, service=None):
         or service == service_name["grok"]
         or service == service_name["open_router"]
         or service == service_name["mistral"]
-        or service == service_name["ai_ml"]
     ):
         content = response.get("choices", [{}])[0].get("message", {}).get("content", None)
-    
+
     elif service == service_name["gemini"]:
         content = response["candidates"][0]["content"]["parts"][0]["text"]
 
@@ -127,7 +134,6 @@ async def check_space_issue(response, service=None):
             or service == service_name["open_router"]
             or service == service_name["mistral"]
             or service == service_name["gemini"]
-            or service == service_name["ai_ml"]
         ):
             response["choices"][0]["message"]["content"] = text
         elif service == service_name["gemini"]:

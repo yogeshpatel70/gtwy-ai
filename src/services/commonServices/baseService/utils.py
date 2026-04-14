@@ -30,7 +30,7 @@ def clean_json(data):
 
 def validate_tool_call(service, response):
     match service: # TODO: Fix validation process.
-        case  'openai_completion' | 'groq' | 'grok' | 'open_router' | 'mistral' | 'ai_ml':
+        case  'openai_completion' | 'groq' | 'grok' | 'open_router' | 'mistral':
             tool_calls = response.get('choices', [])[0].get('message', {}).get("tool_calls", [])
             return len(tool_calls) > 0 if tool_calls is not None else False
         case "openai":
@@ -133,7 +133,6 @@ def tool_call_formatter(configuration: dict, service: str, variables: dict, vari
         service == service_name["openai_completion"]
         or service == service_name["open_router"]
         or service == service_name["mistral"]
-        or service == service_name["ai_ml"]
     ):
         data_to_send = [
             {
@@ -456,7 +455,7 @@ def make_code_mapping_by_service(responses, service):
     codes_mapping = {}
     function_list = []
     match service:
-        case 'openai_completion' | 'groq' | 'grok' | 'open_router' | 'mistral' | 'ai_ml':
+        case 'openai_completion' | 'groq' | 'grok' | 'open_router' | 'mistral':
 
             for tool_call in responses['choices'][0]['message']['tool_calls']:
                 name = tool_call['function']['name']
@@ -674,7 +673,7 @@ def build_accumulated_response(service, configuration, message_id, accumulated_c
     """Build a complete response dict from streamed data, matching the shape of each service's non-stream response."""
     full_text = "".join(accumulated_content)
     if service in [service_name["groq"], service_name["grok"],
-                   service_name["open_router"], service_name["mistral"], service_name["ai_ml"]]:
+                   service_name["open_router"], service_name["mistral"]]:
         return {
             "choices": [{
                 "index": 0,
@@ -784,3 +783,58 @@ async def run_stream_and_collect(generator, streamer):
         "last_delta": last_delta,
         "service_tier": service_tier,
     }
+
+
+def remove_additional_properties_with_anyof(schema):
+    """
+    Remove additionalProperties when anyOf exists at the same level.
+
+    For Anthropic and Mistral, having both anyOf and additionalProperties
+    at the same level can cause issues. This removes additionalProperties
+    when anyOf is present.
+
+    Args:
+        schema (dict): The JSON schema to format
+
+    Returns:
+        dict: The formatted schema with additionalProperties removed where anyOf exists
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    def process_schema(obj):
+        """Recursively process schema to remove additionalProperties when anyOf exists."""
+        if isinstance(obj, dict):
+            # If both anyOf and additionalProperties exist at same level, remove additionalProperties and type
+            if 'anyOf' in obj and 'additionalProperties' in obj:
+                del obj['additionalProperties']
+                del obj['type']
+
+            # Recursively process properties
+            if 'properties' in obj and isinstance(obj['properties'], dict):
+                for prop_value in obj['properties'].values():
+                    process_schema(prop_value)
+
+            # Recursively process items (for arrays)
+            if 'items' in obj:
+                process_schema(obj['items'])
+
+            # Recursively process additionalProperties
+            if 'additionalProperties' in obj and isinstance(obj['additionalProperties'], dict):
+                process_schema(obj['additionalProperties'])
+
+            # Recursively process allOf, anyOf, oneOf
+            for combiner in ['allOf', 'anyOf', 'oneOf']:
+                if combiner in obj and isinstance(obj[combiner], list):
+                    for item in obj[combiner]:
+                        if isinstance(item, dict):
+                            process_schema(item)
+
+            # Process definitions if they exist
+            if 'definitions' in obj and isinstance(obj['definitions'], dict):
+                for definition in obj['definitions'].values():
+                    if isinstance(definition, dict):
+                        process_schema(definition)
+
+    process_schema(schema)
+    return schema
