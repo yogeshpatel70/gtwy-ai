@@ -196,7 +196,7 @@ def parse_request_body(request_body):
             for url in body.get("user_urls", [])
             if isinstance(url, dict) and url.get("type") == "image" and url.get("url")
         ],
-        "maximum_iterations": body.get("maximum_iterations"),
+        "maximum_iterations": body.get("settings", {}).get("maximum_iterations") or 3,
         "tokens": {},
         "memory": "",
         "bridge_summary": body.get("bridge_summary"),

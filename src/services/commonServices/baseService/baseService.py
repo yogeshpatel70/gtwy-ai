@@ -214,7 +214,7 @@ class BaseService:
                 configuration["tool_choice"] = {"type": "auto"}
             else:
                 configuration["tool_choice"] = "auto"
-        if validate_tool_call(service, model_response) and loop_count <= int(self.maximum_iterations or 0):
+        if validate_tool_call(service, model_response) and loop_count <= int(self.maximum_iterations):
             loop_count += 1
         else:
             if validate_tool_call(service, model_response):
