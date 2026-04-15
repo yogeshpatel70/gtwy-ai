@@ -222,7 +222,7 @@ def _build_llm_config(model, service, planner_message):
         return {
             "model": model,
             "instructions": PLANNER_PROMPT,
-            "input": planner_message,
+            "input": [{"type": "message", "role": "user", "content": planner_message}],
         }
     else:
         # Groq, Grok, Mistral, OpenRouter — Chat Completions format
