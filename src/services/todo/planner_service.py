@@ -11,7 +11,7 @@ from src.services.commonServices.grok.grokModelRun import grok_stream
 from src.services.commonServices.Google.gemini_modelrun import gemini_modelrun_stream
 from src.services.commonServices.Mistral.mistral_model_run import mistral_stream
 from src.services.commonServices.openRouter.openRouter_modelrun import openrouter_stream
-from src.services.commonServices.baseService.utils import run_stream_and_collect
+from src.services.commonServices.baseService.utils import run_stream_and_collect, reasoning_formatter
 
 PLANNER_PROMPT = """You are a task planner agent. Your job is to break down a user's goal into a structured plan of tasks.
 
@@ -165,31 +165,29 @@ def _build_planner_message(user_goal, agent_context, existing_plan=None, user_fe
     return "\n".join(parts)
 
 
-def _build_llm_config(model, service, planner_message):
+def _build_llm_config(model, service, planner_message, reasoning_config=None):
     """Build a minimal streaming LLM configuration."""
     if service == service_name["anthropic"]:
-        return {
+        config = {
             "model": model,
             "system": PLANNER_PROMPT,
             "messages": [{"role": "user", "content": planner_message}],
             "max_tokens": 4096,
         }
     elif service == service_name["gemini"]:
-        return {
+        config = {
             "model": model,
             "contents": [
                 {"role": "user", "parts": [{"text": PLANNER_PROMPT + "\n\n" + planner_message}]},
             ],
         }
     elif service == service_name["openai"]:
-        # OpenAI Responses API: stream=True added internally by openai_response_stream
-        return {
+        config = {
             "model": model,
             "instructions": PLANNER_PROMPT,
             "input": [{"type": "message", "role": "user", "content": planner_message}],
         }
     else:
-        # Groq, Grok, Mistral, OpenRouter — Chat Completions format
         config = {
             "model": model,
             "messages": [
@@ -197,10 +195,14 @@ def _build_llm_config(model, service, planner_message):
                 {"role": "user", "content": planner_message},
             ],
         }
-        # Groq and OpenRouter SDK need stream=True in the config
         if service in _NEEDS_STREAM_FLAG:
             config["stream"] = True
-        return config
+
+    if reasoning_config:
+        config["reasoning"] = reasoning_config
+        reasoning_formatter(service, config)
+
+    return config
 
 
 def _parse_plan_json(content):
@@ -226,12 +228,13 @@ async def _call_planner_streaming(planner_message, parsed_data, bridge_configura
     model = main_config.get("configuration", {}).get("model", parsed_data.get("model"))
     service = main_config.get("service", parsed_data.get("service"))
     apikey = main_config.get("apikey", parsed_data.get("apikey"))
+    reasoning_config = main_config.get("configuration", {}).get("reasoning")
 
     stream_fn = STREAM_FUNCTIONS.get(service)
     if not stream_fn:
         raise ValueError(f"Unsupported service for planner: {service}")
 
-    config = _build_llm_config(model, service, planner_message)
+    config = _build_llm_config(model, service, planner_message, reasoning_config=reasoning_config)
 
     # All stream functions take (configuration, apikey) as positional args
     generator = stream_fn(config, apikey)
