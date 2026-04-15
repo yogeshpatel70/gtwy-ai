@@ -69,6 +69,18 @@ class StreamingService:
             payload["fallback_error"] = fallback_error
         await self._emit(payload)
 
+    async def emit_task_delta(self, task_id: str, content: str):
+        await self._emit({"event": "task_delta", "task_id": task_id, "content": content})
+
+    async def emit_task_reasoning(self, task_id: str, content: str):
+        await self._emit({"event": "task_reasoning", "task_id": task_id, "content": content})
+
+    async def emit_task_tool_call(self, task_id: str, name: str, args: dict, call_id: str):
+        await self._emit({"event": "task_tool_call", "task_id": task_id, "name": name, "args": args, "call_id": call_id})
+
+    async def emit_task_tool_result(self, task_id: str, name: str, content: str, call_id: str):
+        await self._emit({"event": "task_tool_result", "task_id": task_id, "name": name, "content": content, "call_id": call_id})
+
     async def emit_planning(self):
         """Emit a planning mode event."""
         await self._emit({"event": "planning"})

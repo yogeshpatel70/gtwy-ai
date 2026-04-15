@@ -48,8 +48,12 @@ def _is_plan_complete(tasks):
     return all(t["status"] in TERMINAL_STATUSES for t in tasks.values())
 
 
-async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, plan):
-    """Execute a single task by calling the appropriate agent directly."""
+async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, plan, streamer=None):
+    """Execute a single task by calling the appropriate agent directly.
+    
+    When `streamer` is provided, delta/reasoning/tool events from the agent's
+    stream are forwarded to the client in real-time, tagged with `task_id`.
+    """
     assigned_agent = task.get("assigned_agent") or bridge_id
     task_description = task.get("task_description", task.get("title", ""))
     human_response = task.get("human_response")
@@ -57,13 +61,10 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
         task_description = f"{task_description}\n\nHuman Response: {human_response}"
 
     try:
-        # Import chat function to execute task with agent configuration
         from src.services.commonServices.common import chat
         
-        # Get agent configuration
         agent_config = bridge_configurations.get(assigned_agent, {})
         
-        # Build minimal request body for the agent
         request_body = {
             "user": task_description,
             "bridge_id": assigned_agent,
@@ -73,27 +74,31 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
             "org_id": org_id,
             "variables": {},
             "bridge_configurations": bridge_configurations,
-            "plans": plan,  # Pass the plan context
+            "plans": plan,
         }
         
-        # Merge agent configuration
         request_body.update(agent_config)
+
+        # Force streaming so task events (delta, reasoning, tool_call) are
+        # forwarded to the client in real-time instead of a single bulk response.
+        if streamer:
+            config = request_body.get("configuration", {})
+            if isinstance(config, dict):
+                config["stream"] = True
+                request_body["configuration"] = config
         
-        # Call chat directly
         data_to_send = {"body": request_body, "state": {}}
         response = await chat(data_to_send)
         
-        # Handle different response types
         if hasattr(response, "body"):
-            # JSONResponse
             response_data = json.loads(response.body.decode("utf-8"))
             if response_data.get("success"):
                 content = response_data.get("response", {}).get("data", {}).get("content", "")
                 return {"success": True, "result": content}
             else:
                 return {"success": False, "error": response_data.get("message", "Task execution failed")}
+
         elif hasattr(response, "body_iterator"):
-            # StreamingResponse - consume and extract content
             accumulated_content = []
             done_event = None
             async for chunk in response.body_iterator:
@@ -105,12 +110,41 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
                         continue
                     try:
                         event = json.loads(line[6:])
-                        if event.get("event") == "delta":
-                            accumulated_content.append(event.get("content", ""))
-                        elif event.get("event") == "done":
-                            done_event = event
                     except json.JSONDecodeError:
-                        pass
+                        continue
+
+                    evt_type = event.get("event")
+
+                    if evt_type == "delta":
+                        content_piece = event.get("content", "")
+                        accumulated_content.append(content_piece)
+                        if streamer:
+                            await streamer.emit_task_delta(task_id, content_piece)
+
+                    elif evt_type == "reasoning":
+                        if streamer:
+                            await streamer.emit_task_reasoning(task_id, event.get("content", ""))
+
+                    elif evt_type == "tool_call":
+                        if streamer:
+                            await streamer.emit_task_tool_call(
+                                task_id,
+                                name=event.get("name", ""),
+                                args=event.get("args", {}),
+                                call_id=event.get("call_id", ""),
+                            )
+
+                    elif evt_type == "tool_result":
+                        if streamer:
+                            await streamer.emit_task_tool_result(
+                                task_id,
+                                name=event.get("name", ""),
+                                content=event.get("content", ""),
+                                call_id=event.get("call_id", ""),
+                            )
+
+                    elif evt_type == "done":
+                        done_event = event
             
             content = "".join(accumulated_content)
             if done_event and done_event.get("response", {}).get("data", {}).get("content"):
@@ -118,7 +152,6 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
             
             return {"success": True, "result": content}
         else:
-            # Dict response
             if response.get("success"):
                 content = response.get("response", {}).get("data", {}).get("content", "")
                 return {"success": True, "result": content}
@@ -184,12 +217,12 @@ async def execute_plan(org_id, bridge_id, thread_id, sub_thread_id, bridge_confi
             await _emit("task_started", {"task_id": task_id, "title": tasks[task_id].get("title", "")})
         await plan_store.update_plan(plan)
 
-        # Execute runnable tasks in parallel
+        # Execute runnable tasks in parallel (streamer forwarded for live events)
         coroutines = [
             _execute_single_task(
                 task_id, tasks[task_id],
                 org_id, bridge_id, thread_id, sub_thread_id,
-                bridge_configurations, plan,
+                bridge_configurations, plan, streamer=streamer,
             )
             for task_id in runnable
         ]
