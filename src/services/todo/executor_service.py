@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import uuid
 
@@ -61,10 +62,23 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
         task_description = f"{task_description}\n\nHuman Response: {human_response}"
 
     try:
-        from src.services.commonServices.common import chat
-        
-        agent_config = bridge_configurations.get(assigned_agent, {})
-        
+        from src.services.commonServices.common import chat_multiple_agents
+        from src.services.utils.getConfiguration import getConfiguration
+
+        current_agent_config = bridge_configurations.get(assigned_agent, {})
+        resolved_config = await getConfiguration(
+            configuration=None,
+            service=None,
+            bridge_id=assigned_agent,
+            apikey=None,
+            variables={},
+            org_id=org_id,
+            version_id=current_agent_config.get("version_id"),
+            override_fields={},
+        )
+        if not resolved_config.get("success"):
+            return {"success": False, "error": resolved_config.get("error", "Failed to resolve agent configuration")}
+
         request_body = {
             "user": task_description,
             "bridge_id": assigned_agent,
@@ -73,22 +87,17 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
             "sub_thread_id": sub_thread_id,
             "org_id": org_id,
             "variables": {},
-            "bridge_configurations": bridge_configurations,
+            "bridge_configurations": copy.deepcopy(resolved_config.get("bridge_configurations", {})),
             "plans": plan,
         }
-        
-        request_body.update(agent_config)
 
-        # Force streaming so task events (delta, reasoning, tool_call) are
-        # forwarded to the client in real-time instead of a single bulk response.
+        # Match the direct request path by going through chat_multiple_agents,
+        # which applies the DB-backed agent config before entering chat().
         if streamer:
-            config = request_body.get("configuration", {})
-            if isinstance(config, dict):
-                config["stream"] = True
-                request_body["configuration"] = config
-        
+            request_body.setdefault("configuration", {})["stream"] = True
+
         data_to_send = {"body": request_body, "state": {}}
-        response = await chat(data_to_send)
+        response = await chat_multiple_agents(data_to_send)
         
         if hasattr(response, "body"):
             response_data = json.loads(response.body.decode("utf-8"))
