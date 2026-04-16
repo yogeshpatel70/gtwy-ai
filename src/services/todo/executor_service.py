@@ -96,7 +96,7 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
                 content = response_data.get("response", {}).get("data", {}).get("content", "")
                 return {"success": True, "result": content}
             else:
-                return {"success": False, "error": response_data.get("message", "Task execution failed")}
+                return {"success": False, "error": response_data.get("error") or response_data.get("message") or "Task execution failed"}
 
         elif hasattr(response, "body_iterator"):
             accumulated_content = []
@@ -156,7 +156,7 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
                 content = response.get("response", {}).get("data", {}).get("content", "")
                 return {"success": True, "result": content}
             else:
-                return {"success": False, "error": response.get("message", "Task execution failed")}
+                return {"success": False, "error": response.get("error") or response.get("message") or "Task execution failed"}
 
     except Exception as e:
         logger.error(f"Error executing task {task_id}: {e}")
