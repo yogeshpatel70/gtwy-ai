@@ -389,28 +389,113 @@ def build_orchestrator_log_data(transfer_chain, thread_info=None):
     }
 
 
-async def publish_plan_history_update(message_id, final_plan, history_params):
+async def publish_plan_history_update(
+    *,
+    parsed_data,
+    final_plan,
+    main_agent_metrics=None,
+    history_params_extra=None,
+):
     """
     Publish an update_history message to the log queue so Node.js can update
-    an existing history entry (identified by message_id) once plan execution
-    is complete.  The initial entry was created during the planning phase with
-    the same message_id.
+    the existing conversation_logs row (identified by message_id) once plan
+    execution is complete.
+
+    The initial row was created during the planning phase with the full
+    conversation-log shape but empty metrics.  Here we build the same full
+    shape, enriched with aggregated main-agent telemetry (tokens, latency,
+    reasoning, tools_call_data, etc.) collected by the executor.  The Node
+    consumer whitelist-updates whatever fields it finds in the payload, so
+    this is forward-compatible.
 
     Args:
-        message_id: The message_id that was stored in the plan when it was created.
+        parsed_data: The request dict (has bridge_id, thread_id, sub_thread_id,
+                     org_id, service, model, message_id, user, prompt, version_id).
         final_plan: The fully-executed plan dict with task results.
-        history_params: Dict with optional keys: message, finish_reason, status.
+        main_agent_metrics: Output of `finalize_main_agent_metrics` from the
+                            executor. None for planning-phase updates where no
+                            execution happened.
+        history_params_extra: Dict with override keys for final message /
+                              finish_reason / status (e.g. completion copy).
     """
     try:
         from ..services.cache_service import make_json_serializable
         from ..services.commonServices.queueService.queueLogService import sub_queue_obj
 
+        metrics = main_agent_metrics or {}
+        extra = history_params_extra or {}
+
+        message_id = (
+            (final_plan or {}).get("message_id")
+            or parsed_data.get("message_id")
+        )
+        if not message_id:
+            logger.error("publish_plan_history_update: missing message_id — cannot update history row")
+            return
+
+        version_id = parsed_data.get("version_id")
+        thread_id = parsed_data.get("thread_id")
+        sub_thread_id = parsed_data.get("sub_thread_id") or thread_id
+
+        # Synthesize the single-element `dataset` that build_history_and_metrics_payload expects.
+        dataset = [{
+            "orgId": parsed_data.get("org_id"),
+            "service": metrics.get("service") or parsed_data.get("service"),
+            "model": metrics.get("model") or parsed_data.get("model"),
+            "success": extra.get("status", metrics.get("success", True)),
+            "inputTokens": metrics.get("input_tokens", 0),
+            "outputTokens": metrics.get("output_tokens", 0),
+            "total_tokens": metrics.get("total_tokens", 0),
+            "expectedCost": metrics.get("expected_cost", 0),
+            "latency": metrics.get("latency") or {},
+            "variables": parsed_data.get("variables") or {},
+            "error": metrics.get("last_error"),
+        }]
+
+        history_params = {
+            "message": extra.get("message", ""),
+            "reasoning": metrics.get("reasoning", ""),
+            "user": parsed_data.get("user", ""),
+            "chatbot_message": "",
+            "error": metrics.get("last_error"),
+            "tools_call_data": metrics.get("tools_call_data", []),
+            "message_id": message_id,
+            "sub_thread_id": sub_thread_id,
+            "thread_id": thread_id,
+            "user_urls": parsed_data.get("user_urls", []),
+            "llm_urls": metrics.get("llm_urls", []),
+            "AiConfig": metrics.get("AiConfig"),
+            "fallback_model": metrics.get("fallback_model") or {},
+            "org_id": parsed_data.get("org_id"),
+            "service": metrics.get("service") or parsed_data.get("service"),
+            "model": metrics.get("model") or parsed_data.get("model"),
+            "firstAttemptError": metrics.get("firstAttemptError"),
+            "bridge_id": parsed_data.get("bridge_id"),
+            "prompt": parsed_data.get("prompt"),
+            "plans": final_plan,
+            "response": {
+                "data": {
+                    "finish_reason": extra.get(
+                        "finish_reason", metrics.get("finish_reason", "stop")
+                    )
+                }
+            },
+        }
+
+        payload = build_history_and_metrics_payload(dataset, history_params, version_id)
+        conversation_log_data = payload["conversation_log_data"]
+
+        # build_history_and_metrics_payload derives `status` from dataset[0].success;
+        # honor an explicit override if the caller provided one.
+        if "status" in extra:
+            conversation_log_data["status"] = extra["status"]
+
+        # `plans` is always the authoritative executed plan.
+        conversation_log_data["plans"] = final_plan
+
         update_data = {
             "message_id": str(message_id),
-            "llm_message": history_params.get("message", ""),
-            "plans": final_plan,
-            "finish_reason": history_params.get("finish_reason", "stop"),
-            "status": history_params.get("status", True),
+            **conversation_log_data,
         }
         message = make_json_serializable({"update_history": update_data})
         await sub_queue_obj.publish_message(message)
