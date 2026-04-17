@@ -127,7 +127,7 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
             await streamer.emit_delta(json.dumps({"event": "execution_started", "state": "executing"}))
             await streamer.emit_execution()
             # Run executor — stream stays open, task events emitted per task
-            await executor_service.execute_plan(
+            main_agent_metrics = await executor_service.execute_plan(
                 org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, streamer=streamer
             )
             final_plan = await plan_store.get_plan(org_id, bridge_id, thread_id, sub_thread_id)
@@ -138,13 +138,14 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
                 finish_reason="stop",
                 accumulated_data=formatted,
             )
-            # Update the history entry that was created during planning
-            plan_message_id = (final_plan or {}).get("message_id") or message_id
+            # Update the history entry that was created during planning, enriched
+            # with aggregated main-agent telemetry (tokens, latency, tools, reasoning).
             asyncio.create_task(
                 publish_plan_history_update(
-                    message_id=plan_message_id,
+                    parsed_data=parsed_data,
                     final_plan=final_plan,
-                    history_params={
+                    main_agent_metrics=main_agent_metrics,
+                    history_params_extra={
                         "message": formatted["data"]["content"],
                         "finish_reason": "stop",
                         "status": (final_plan or {}).get("state") == "completed",
@@ -199,7 +200,7 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
             # Resume execution — live events are streamed through the same connection
             plan["state"] = "approved"
             await plan_store.update_plan(plan)
-            await executor_service.execute_plan(
+            main_agent_metrics = await executor_service.execute_plan(
                 org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, streamer=streamer
             )
             final_plan = await plan_store.get_plan(org_id, bridge_id, thread_id, sub_thread_id)
@@ -210,13 +211,12 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
                 finish_reason="stop",
                 accumulated_data=formatted,
             )
-            # Update the history entry that was created during planning
-            plan_message_id = (final_plan or {}).get("message_id") or message_id
             asyncio.create_task(
                 publish_plan_history_update(
-                    message_id=plan_message_id,
+                    parsed_data=parsed_data,
                     final_plan=final_plan,
-                    history_params={
+                    main_agent_metrics=main_agent_metrics,
+                    history_params_extra={
                         "message": formatted["data"]["content"],
                         "finish_reason": "stop",
                         "status": (final_plan or {}).get("state") == "completed",
@@ -248,7 +248,7 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
             # Emit execution event and restart executor
             await streamer.emit_delta(json.dumps({"event": "execution_started", "state": "executing"}))
             await streamer.emit_execution()
-            await executor_service.execute_plan(
+            main_agent_metrics = await executor_service.execute_plan(
                 org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, streamer=streamer
             )
             final_plan = await plan_store.get_plan(org_id, bridge_id, thread_id, sub_thread_id)
@@ -259,13 +259,12 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
                 finish_reason="stop",
                 accumulated_data=formatted,
             )
-            # Update the history entry that was created during planning
-            plan_message_id = (final_plan or {}).get("message_id") or message_id
             asyncio.create_task(
                 publish_plan_history_update(
-                    message_id=plan_message_id,
+                    parsed_data=parsed_data,
                     final_plan=final_plan,
-                    history_params={
+                    main_agent_metrics=main_agent_metrics,
+                    history_params_extra={
                         "message": formatted["data"]["content"],
                         "finish_reason": "stop",
                         "status": (final_plan or {}).get("state") == "completed",
@@ -338,13 +337,14 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
                 finish_reason="stop",
                 accumulated_data=_format_plan_response(plan, message_id, model),
             )
-            # Update the existing history entry with the revised plan
-            plan_message_id = plan.get("message_id") or message_id
+            # Update the existing history entry with the revised plan (no execution yet,
+            # so no main-agent metrics — only plans/finish_reason/status move).
             asyncio.create_task(
                 publish_plan_history_update(
-                    message_id=plan_message_id,
+                    parsed_data=parsed_data,
                     final_plan=plan,
-                    history_params={
+                    main_agent_metrics=None,
+                    history_params_extra={
                         "message": "",
                         "finish_reason": "planning",
                         "status": True,
