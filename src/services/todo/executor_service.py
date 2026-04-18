@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import time
 import uuid
 
 from globals import logger
@@ -8,6 +9,162 @@ from src.services.todo import plan_store
 
 
 TERMINAL_STATUSES = {"completed", "failed", "skipped", "waiting_for_user"}
+
+
+def _init_main_agent_metrics():
+    """
+    Aggregate container for main-agent task telemetry. Primary-agent sub-tasks
+    run with skip_history=True, so nothing else persists their tokens/latency/
+    tools/reasoning. We sum them here and hand them to the final history update.
+    """
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "expected_cost": 0.0,
+        "latency_total": 0.0,
+        "per_task_latency": [],
+        "tools_call_data": [],
+        "_tool_calls_by_id": {},
+        "reasoning_parts": [],
+        "service": None,
+        "model": None,
+        "finish_reason": "stop",
+        "success": True,
+        "firstAttemptError": None,
+        "AiConfig": None,
+        "fallback_model": None,
+        "llm_urls": [],
+        "annotations": [],
+        "last_error": None,
+    }
+
+
+def _merge_task_metrics(
+    metrics,
+    task_id,
+    done_event,
+    collected_tool_calls,
+    reasoning_buf,
+    task_success,
+    error,
+    *,
+    agent_config=None,
+    elapsed_seconds=None,
+    fallback_model=None,
+    service=None,
+    model=None,
+):
+    """Fold a single primary-agent task's telemetry into the shared aggregate.
+
+    `agent_config`, `fallback_model`, `service`, `model`, `elapsed_seconds`
+    come from the executor context (bridge_configurations + wall-clock timing)
+    because the inner chat's SSE `done` event only carries `response.data`
+    and `response.usage`.  AiConfig / fallback_model / latency / firstAttemptError
+    live in `result.historyParams` inside baseService and are never streamed.
+    """
+    if metrics is None:
+        return
+
+    usage = (done_event or {}).get("usage") or {}
+    response = (done_event or {}).get("response") or {}
+    data = response.get("data") or {}
+
+    input_t = usage.get("input_tokens") or 0
+    output_t = usage.get("output_tokens") or 0
+    total_t = usage.get("total_tokens") or (input_t + output_t)
+    cost = usage.get("cost") or usage.get("expected_cost") or 0
+
+    metrics["input_tokens"] += input_t
+    metrics["output_tokens"] += output_t
+    metrics["total_tokens"] += total_t
+    try:
+        metrics["expected_cost"] += float(cost or 0)
+    except (TypeError, ValueError):
+        pass
+
+    # Latency: prefer the provider-reported figure, fall back to wall-clock.
+    provider_latency = data.get("latency")
+    if isinstance(provider_latency, dict):
+        over_all = provider_latency.get("over_all_time") or 0
+    elif isinstance(provider_latency, (int, float)):
+        over_all = provider_latency
+    else:
+        over_all = 0
+    try:
+        over_all = float(over_all or 0)
+    except (TypeError, ValueError):
+        over_all = 0.0
+    if over_all <= 0 and elapsed_seconds is not None:
+        try:
+            over_all = float(elapsed_seconds)
+        except (TypeError, ValueError):
+            over_all = 0.0
+    metrics["latency_total"] += over_all
+    metrics["per_task_latency"].append({"task_id": task_id, "time": round(over_all, 4)})
+
+    effective_model = data.get("model") or model
+    if effective_model and not metrics["model"]:
+        metrics["model"] = effective_model
+    effective_service = response.get("service") or service
+    if effective_service and not metrics["service"]:
+        metrics["service"] = effective_service
+
+    if response.get("firstAttemptError"):
+        metrics["firstAttemptError"] = response["firstAttemptError"]
+
+    # AiConfig = the bridge's customConfig sent to the LLM.  Pulled from the
+    # bridge configuration we already have in hand.
+    if agent_config and not metrics["AiConfig"]:
+        metrics["AiConfig"] = agent_config
+
+    if fallback_model and not metrics["fallback_model"]:
+        metrics["fallback_model"] = fallback_model
+
+    if response.get("llm_urls"):
+        metrics["llm_urls"].extend(response["llm_urls"])
+    if response.get("annotations"):
+        metrics["annotations"].extend(response["annotations"])
+
+    if reasoning_buf:
+        metrics["reasoning_parts"].append("".join(reasoning_buf))
+
+    if collected_tool_calls:
+        metrics["tools_call_data"].extend(collected_tool_calls)
+
+    if not task_success:
+        metrics["success"] = False
+        metrics["finish_reason"] = "error"
+        if error:
+            metrics["last_error"] = str(error)
+
+
+def finalize_main_agent_metrics(metrics):
+    """Shape the aggregate into the fields needed by the history payload."""
+    if not metrics:
+        return None
+    return {
+        "input_tokens": metrics["input_tokens"],
+        "output_tokens": metrics["output_tokens"],
+        "total_tokens": metrics["total_tokens"],
+        "expected_cost": metrics["expected_cost"],
+        "latency": {
+            "over_all_time": metrics["latency_total"],
+            "per_task": metrics["per_task_latency"],
+        },
+        "tools_call_data": metrics["tools_call_data"],
+        "reasoning": "\n".join(p for p in metrics["reasoning_parts"] if p),
+        "service": metrics["service"],
+        "model": metrics["model"],
+        "finish_reason": metrics["finish_reason"],
+        "success": metrics["success"],
+        "firstAttemptError": metrics["firstAttemptError"],
+        "AiConfig": metrics["AiConfig"],
+        "fallback_model": metrics["fallback_model"] or {},
+        "llm_urls": metrics["llm_urls"],
+        "annotations": metrics["annotations"],
+        "last_error": metrics["last_error"],
+    }
 
 
 def _get_runnable_tasks(tasks):
@@ -49,11 +206,43 @@ def _is_plan_complete(tasks):
     return all(t["status"] in TERMINAL_STATUSES for t in tasks.values())
 
 
-async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, plan, streamer=None):
+def _inject_variables_into_tool_args(tool_name, args, variables, variables_path, tool_id_and_name_mapping):
+    """Inject static variables into tool arguments based on variables_path mapping.
+    Matches the behavior of replace_variables_in_args in main flow.
+    """
+    if not variables_path or not variables:
+        return args
+    
+    import pydash as _
+    
+    # Get the function name for variable path lookup
+    tool_mapping = tool_id_and_name_mapping.get(tool_name, {})
+    if tool_mapping.get("type") == "AGENT":
+        function_name = tool_mapping.get("bridge_id", "")
+    else:
+        function_name = tool_mapping.get("name", tool_name)
+    
+    # Inject variables based on variables_path mapping
+    enriched_args = dict(args or {})
+    function_variables_path = variables_path.get(function_name, {})
+    
+    for path_key, path_value in function_variables_path.items():
+        value_to_set = _.objects.get(variables, path_value)
+        if value_to_set is not None:
+            _.objects.set_(enriched_args, path_key, value_to_set)
+    
+    return enriched_args
+
+
+async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, plan, streamer=None, main_agent_metrics=None, variables=None, variables_path=None):
     """Execute a single task by calling the appropriate agent directly.
     
     When `streamer` is provided, delta/reasoning/tool events from the agent's
     stream are forwarded to the client in real-time, tagged with `task_id`.
+
+    When `main_agent_metrics` is provided and the task runs on the main bridge,
+    per-task tokens / latency / reasoning / tool_calls are folded into the
+    aggregate so the final history update can persist them.
     """
     assigned_agent = task.get("assigned_agent") or bridge_id
     # A task is a "primary-agent sub-task" when no explicit agent was assigned
@@ -61,11 +250,14 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
     # per-sub-task history so the conversation log shows only the final plan
     # result saved by todo_handler, not every intermediate LLM call.
     is_primary_agent_task = not task.get("assigned_agent") or task.get("assigned_agent") == bridge_id
+    aggregate_metrics = main_agent_metrics if is_primary_agent_task else None
 
     task_description = task.get("task_description", task.get("title", ""))
     human_response = task.get("human_response")
     if human_response:
         task_description = f"{task_description}\n\nHuman Response: {human_response}"
+
+    task_started_at = time.perf_counter() if aggregate_metrics is not None else None
 
     try:
         from src.services.commonServices.common import chat_multiple_agents
@@ -77,7 +269,7 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
             service=None,
             bridge_id=assigned_agent,
             apikey=None,
-            variables={},
+            variables=variables or {},
             org_id=org_id,
             version_id=current_agent_config.get("version_id"),
             override_fields={},
@@ -92,7 +284,8 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
             "thread_id": thread_id,
             "sub_thread_id": sub_thread_id,
             "org_id": org_id,
-            "variables": {},
+            "variables": variables or {},
+            "variables_path": variables_path or {},
             "bridge_configurations": copy.deepcopy(resolved_config.get("bridge_configurations", {})),
             "plans": plan,
             # Skip per-sub-task history for the primary agent; its final
@@ -119,6 +312,9 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
         elif hasattr(response, "body_iterator"):
             accumulated_content = []
             done_event = None
+            reasoning_parts = []
+            tool_calls_by_id = {}
+            tool_calls_order = []
             async for chunk in response.body_iterator:
                 if isinstance(chunk, bytes):
                     chunk = chunk.decode("utf-8")
@@ -140,34 +336,114 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
                             await streamer.emit_task_delta(task_id, content_piece)
 
                     elif evt_type == "reasoning":
+                        reasoning_piece = event.get("content", "")
+                        if aggregate_metrics is not None and reasoning_piece:
+                            reasoning_parts.append(reasoning_piece)
                         if streamer:
-                            await streamer.emit_task_reasoning(task_id, event.get("content", ""))
+                            await streamer.emit_task_reasoning(task_id, reasoning_piece)
 
                     elif evt_type == "tool_call":
+                        call_id = event.get("call_id", "")
+                        if aggregate_metrics is not None:
+                            # Format matches main flow: {call_id: {name, args, data, id}}
+                            if not call_id:
+                                # Generate fallback ID if missing
+                                call_id = f"tool_{task_id}_{len(tool_calls_order)}"
+                            
+                            if call_id not in tool_calls_by_id:
+                                # Inject static variables into args before storing in history
+                                # This matches main flow where replace_variables_in_args is called
+                                # before process_data_and_run_tools builds tool history
+                                raw_args = event.get("args", {})
+                                tool_name = event.get("name", "")
+                                tool_id_and_name_mapping = (bridge_configurations.get(assigned_agent, {}) or {}).get("tool_id_and_name_mapping", {})
+                                enriched_args = _inject_variables_into_tool_args(
+                                    tool_name, raw_args, variables, variables_path, tool_id_and_name_mapping
+                                )
+                                
+                                # Create entry matching main flow format
+                                tool_entry = {
+                                    call_id: {
+                                        "name": tool_name,
+                                        "args": enriched_args,  # Store enriched args with injected variables
+                                        "data": None,  # Will be updated when tool_result arrives
+                                        "id": tool_name,  # Tool identifier
+                                    }
+                                }
+                                tool_calls_by_id[call_id] = tool_entry[call_id]
+                                tool_calls_order.append(tool_entry)
                         if streamer:
                             await streamer.emit_task_tool_call(
                                 task_id,
                                 name=event.get("name", ""),
                                 args=event.get("args", {}),
-                                call_id=event.get("call_id", ""),
+                                call_id=call_id,
                             )
 
                     elif evt_type == "tool_result":
+                        call_id = event.get("call_id", "")
+                        result_content = event.get("content", "")
+                        if aggregate_metrics is not None:
+                            if call_id and call_id in tool_calls_by_id:
+                                # Update the data field in existing entry
+                                tool_calls_by_id[call_id]["data"] = {
+                                    "response": result_content,
+                                    "status": 1,
+                                    "metadata": {"type": "function"}
+                                }
+                            else:
+                                # Tool result without prior tool_call - create standalone entry
+                                if not call_id:
+                                    call_id = f"tool_{task_id}_{len(tool_calls_order)}"
+                                tool_entry = {
+                                    call_id: {
+                                        "name": event.get("name", ""),
+                                        "args": {},
+                                        "data": {
+                                            "response": result_content,
+                                            "status": 1,
+                                            "metadata": {"type": "function"}
+                                        },
+                                        "id": event.get("name", ""),
+                                    }
+                                }
+                                tool_calls_order.append(tool_entry)
                         if streamer:
                             await streamer.emit_task_tool_result(
                                 task_id,
                                 name=event.get("name", ""),
-                                content=event.get("content", ""),
-                                call_id=event.get("call_id", ""),
+                                content=result_content,
+                                call_id=call_id,
                             )
 
                     elif evt_type == "done":
                         done_event = event
-            
+
             content = "".join(accumulated_content)
             if done_event and done_event.get("response", {}).get("data", {}).get("content"):
                 content = done_event["response"]["data"]["content"]
-            
+
+            if aggregate_metrics is not None:
+                elapsed = (
+                    time.perf_counter() - task_started_at
+                    if task_started_at is not None
+                    else None
+                )
+                _merge_task_metrics(
+                    aggregate_metrics,
+                    task_id,
+                    done_event,
+                    tool_calls_order,
+                    reasoning_parts,
+                    task_success=True,
+                    error=None,
+                    agent_config=current_agent_config.get("configuration"),
+                    elapsed_seconds=elapsed,
+                    fallback_model=current_agent_config.get("fall_back"),
+                    service=current_agent_config.get("service"),
+                    model=(current_agent_config.get("configuration") or {}).get("model"),
+                )
+
             return {"success": True, "result": content}
         else:
             if response.get("success"):
@@ -181,15 +457,22 @@ async def _execute_single_task(task_id, task, org_id, bridge_id, thread_id, sub_
         return {"success": False, "error": str(e)}
 
 
-async def execute_plan(org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, streamer=None):
+async def execute_plan(org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, parsed_data, streamer=None):
     """
     Execute all tasks respecting dependencies and parallelism.
     If `streamer` is provided, task progress events are emitted live via SSE.
+
+    Returns the finalized main-agent metrics aggregate (tokens, latency,
+    reasoning, tools_call_data, etc.) so the caller can attach it to the
+    history update. Connected-agent tasks are excluded — they persist their
+    own rows via the normal chat path.
     """
     plan = await plan_store.get_plan(org_id, bridge_id, thread_id, sub_thread_id)
     if not plan:
         logger.error(f"Plan not found for {org_id}/{bridge_id}/{thread_id}/{sub_thread_id}")
-        return
+        return None
+
+    main_agent_metrics = _init_main_agent_metrics()
 
     plan["state"] = "executing"
     await plan_store.update_plan(plan)
@@ -201,10 +484,9 @@ async def execute_plan(org_id, bridge_id, thread_id, sub_thread_id, bridge_confi
     tasks = plan.get("tasks", {})
 
     while True:
-        # Refresh plan from store (in case of external updates like HIL responses)
         plan = await plan_store.get_plan(org_id, bridge_id, thread_id, sub_thread_id)
         if not plan:
-            break
+            return finalize_main_agent_metrics(main_agent_metrics)
         tasks = plan.get("tasks", {})
 
         # Check if all tasks are done
@@ -236,11 +518,18 @@ async def execute_plan(org_id, bridge_id, thread_id, sub_thread_id, bridge_confi
         await plan_store.update_plan(plan)
 
         # Execute runnable tasks in parallel (streamer forwarded for live events)
+        # Extract variables from parsed_data for connected agent calls
+        plan_variables = parsed_data.get("variables") or {}
+        plan_variables_path = parsed_data.get("variables_path") or {}
+        
         coroutines = [
             _execute_single_task(
                 task_id, tasks[task_id],
                 org_id, bridge_id, thread_id, sub_thread_id,
                 bridge_configurations, plan, streamer=streamer,
+                main_agent_metrics=main_agent_metrics,
+                variables=plan_variables,
+                variables_path=plan_variables_path,
             )
             for task_id in runnable
         ]
@@ -301,6 +590,8 @@ async def execute_plan(org_id, bridge_id, thread_id, sub_thread_id, bridge_confi
         plan["state"] = "failed" if has_failures else "completed"
         await plan_store.update_plan(plan)
         await _emit("plan_completed", {"state": plan["state"], "plan": plan})
+
+    return finalize_main_agent_metrics(main_agent_metrics)
 
 
 async def resume_task(org_id, bridge_id, thread_id, sub_thread_id, task_id, human_response):
