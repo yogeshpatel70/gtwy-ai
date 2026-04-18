@@ -2,18 +2,8 @@ import json
 
 from globals import logger
 from src.services.utils.helper import Helper
-from src.configs.constant import service_name
 from src.services.prebuilt_prompt_service import get_specific_prebuilt_prompt_without_org_service
 from src.services.todo import plan_store
-
-from src.services.commonServices.openAI.runModel import openai_response_stream
-from src.services.commonServices.anthropic.anthropicModelRun import anthropic_stream
-from src.services.commonServices.groq.groqModelRun import groq_stream
-from src.services.commonServices.grok.grokModelRun import grok_stream
-from src.services.commonServices.Google.gemini_modelrun import gemini_modelrun_stream
-from src.services.commonServices.Mistral.mistral_model_run import mistral_stream
-from src.services.commonServices.openRouter.openRouter_modelrun import openrouter_stream
-from src.services.commonServices.baseService.utils import run_stream_and_collect, reasoning_formatter
 
 PLANNER_PROMPT = """
 Role — Task Planning Agent 
@@ -55,21 +45,6 @@ Always return only JSON in the specified format
 }
 
 """
-
-
-# Streaming functions per service — all take (configuration, apikey) positional args
-STREAM_FUNCTIONS = {
-    service_name["openai"]: openai_response_stream,
-    service_name["anthropic"]: anthropic_stream,
-    service_name["groq"]: groq_stream,
-    service_name["grok"]: grok_stream,
-    service_name["gemini"]: gemini_modelrun_stream,
-    service_name["mistral"]: mistral_stream,
-    service_name["open_router"]: openrouter_stream,
-}
-
-# These services need stream=True added to the config dict (SDK-based, not handled internally)
-_NEEDS_STREAM_FLAG = {service_name["groq"], service_name["open_router"]}
 
 
 def _build_agent_context(parsed_data, bridge_configurations):
@@ -146,46 +121,6 @@ def _build_planner_message(user_goal, agent_context, existing_plan=None, user_fe
     return "\n".join(parts)
 
 
-def _build_llm_config(model, service, planner_message, reasoning_config=None, planner_prompt=None):
-    """Build a minimal streaming LLM configuration."""
-    if service == service_name["anthropic"]:
-        config = {
-            "model": model,
-            "system": planner_prompt,
-            "messages": [{"role": "user", "content": planner_message}],
-            "max_tokens": 4096,
-        }
-    elif service == service_name["gemini"]:
-        config = {
-            "model": model,
-            "contents": [
-                {"role": "user", "parts": [{"text": planner_prompt + "\n\n" + planner_message}]},
-            ],
-        }
-    elif service == service_name["openai"]:
-        config = {
-            "model": model,
-            "instructions": planner_prompt,
-            "input": [{"type": "message", "role": "user", "content": planner_message}],
-        }
-    else:
-        config = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": planner_prompt},
-                {"role": "user", "content": planner_message},
-            ],
-        }
-        if service in _NEEDS_STREAM_FLAG:
-            config["stream"] = True
-
-    if reasoning_config:
-        config["reasoning"] = reasoning_config
-        reasoning_formatter(service, config)
-
-    return config
-
-
 def _parse_plan_json(content):
     """Parse JSON plan from LLM content, stripping markdown fences if present."""
     if "```json" in content:
@@ -198,46 +133,8 @@ def _parse_plan_json(content):
         raise ValueError(f"Planner returned invalid JSON: {e}\nContent: {content[:500]}")
 
 
-async def _call_planner_streaming(planner_message, parsed_data, bridge_configurations, streamer, planner_prompt):
-    """
-    Call the LLM in streaming mode. Tokens are emitted to `streamer` as they arrive.
-    Returns the parsed plan JSON dict after the stream completes.
-    """
-    main_bridge_id = parsed_data["bridge_id"]
-    main_config = bridge_configurations.get(main_bridge_id, {})
-
-    model = main_config.get("configuration", {}).get("model", parsed_data.get("model"))
-    service = main_config.get("service", parsed_data.get("service"))
-    apikey = main_config.get("apikey", parsed_data.get("apikey"))
-    reasoning_config = main_config.get("configuration", {}).get("reasoning")
-
-    stream_fn = STREAM_FUNCTIONS.get(service)
-    if not stream_fn:
-        raise ValueError(f"Unsupported service for planner: {service}")
-
-    config = _build_llm_config(model, service, planner_message, reasoning_config=reasoning_config, planner_prompt=planner_prompt)
-
-    # All stream functions take (configuration, apikey) as positional args
-    generator = stream_fn(config, apikey)
-    stream_state = await run_stream_and_collect(generator, streamer)
-
-    if stream_state.get("error_in_stream"):
-        raise ValueError(f"Planner stream error: {stream_state['error_in_stream']}")
-
-    content = "".join(stream_state.get("accumulated_content", []))
-    if not content:
-        raise ValueError("Planner returned empty response")
-
-    return _parse_plan_json(content)
-
 def _build_planner_system_prompt(prompt, agent_context):
     return f"{prompt}\n\n ***user agent system prompt*** : {agent_context}"
-
-
-def _prepare_planner_prompt(parsed_data, bridge_configurations):
-    """Build the planner system prompt with agent context. Reusable across create_plan and update_plan."""
-    agent_context = _build_agent_context(parsed_data, bridge_configurations)
-    return _build_planner_system_prompt(PLANNER_PROMPT, agent_context)
 
 
 async def _get_planner_prompt_from_db(default_prompt):
@@ -251,51 +148,37 @@ async def _get_planner_prompt_from_db(default_prompt):
     return default_prompt
 
 
-async def create_plan(parsed_data, bridge_configurations, streamer):
-    """Create a new plan, streaming tokens to `streamer`."""
-    user_goal = parsed_data["user"]
+async def prepare_planner_request(parsed_data, bridge_configurations, custom_config):
+    """Mutate parsed_data + custom_config so the normal chat() pipeline serves
+    the planner call. Injects the planner system prompt (merged with the user
+    agent's prompt as context) and forces json_object response. For update
+    calls (existing plan in Redis), folds the current plan into the user
+    message so the LLM can revise it based on the new feedback.
+    """
     db_planner_prompt = await _get_planner_prompt_from_db(PLANNER_PROMPT)
     planner_prompt = _build_planner_system_prompt(
-        db_planner_prompt, _build_agent_context(parsed_data, bridge_configurations)
+        db_planner_prompt,
+        _build_agent_context(parsed_data, bridge_configurations),
     )
-    planner_message = _build_planner_message(user_goal, "")
-    plan_data = await _call_planner_streaming(planner_message, parsed_data, bridge_configurations, streamer, planner_prompt)
+    original_prompt = (parsed_data.get("configuration") or {}).get("prompt") or ""
+    merged_prompt = f"{planner_prompt}\n\n***user agent system prompt***: {original_prompt}"
+    parsed_data.setdefault("configuration", {})["prompt"] = merged_prompt
 
-    plan = {
-        "goal": plan_data.get("goal", user_goal),
-        "state": "planning",
-        "bridge_id": parsed_data["bridge_id"],
-        "org_id": parsed_data["org_id"],
-        "thread_id": parsed_data["thread_id"],
-        "sub_thread_id": parsed_data.get("sub_thread_id") or parsed_data["thread_id"],
-        "tasks": plan_data.get("tasks", {}),
-        # Persisted so execution phases can update the same history entry
-        "message_id": parsed_data.get("message_id", ""),
-    }
+    custom_config["response_type"] = {"type": "json_object"}
 
-    await plan_store.save_plan(plan)
-    return plan
-
-
-async def update_plan(existing_plan, user_feedback, parsed_data, bridge_configurations, streamer):
-    """Update an existing plan based on user feedback, streaming tokens to `streamer`."""
-    db_planner_prompt = await _get_planner_prompt_from_db(PLANNER_PROMPT)
-    planner_prompt = _build_planner_system_prompt(
-        db_planner_prompt, _build_agent_context(parsed_data, bridge_configurations)
+    existing_plan = await plan_store.get_plan(
+        parsed_data["org_id"],
+        parsed_data["bridge_id"],
+        parsed_data["thread_id"],
+        parsed_data.get("sub_thread_id") or parsed_data["thread_id"],
     )
-    agent_context = _build_agent_context(parsed_data, bridge_configurations)
-    planner_message = _build_planner_message(
-        existing_plan["goal"],
-        agent_context,
-        existing_plan=existing_plan,
-        user_feedback=user_feedback,
-    )
+    if existing_plan:
+        user_feedback = parsed_data.get("user", "")
+        parsed_data["user"] = _build_planner_message(
+            existing_plan.get("goal", user_feedback),
+            "",
+            existing_plan=existing_plan,
+            user_feedback=user_feedback,
+        )
 
-    plan_data = await _call_planner_streaming(planner_message, parsed_data, bridge_configurations, streamer, planner_prompt)
 
-    existing_plan["tasks"] = plan_data.get("tasks", existing_plan["tasks"])
-    existing_plan["goal"] = plan_data.get("goal", existing_plan["goal"])
-    existing_plan["state"] = "planning"
-
-    await plan_store.update_plan(existing_plan)
-    return existing_plan

@@ -54,6 +54,7 @@ from src.send_alert import send_alert
 from .response_caching_service import handle_response_caching
 from workflow import execute_advanced_workflow
 from src.services.todo.todo_handler import handle_todo_mode
+from src.services.todo.planner_service import prepare_planner_request
 
 app = FastAPI()
 configurationModel = db["configurations"]
@@ -272,10 +273,15 @@ async def chat(request_body):
             )
 
         if parsed_data.get("mode") == "plan":
-            return await handle_todo_mode(
-                parsed_data=parsed_data,
-                bridge_configurations=bridge_configurations,
-            )
+            # Executor orchestration actions keep the existing pipeline.
+            # The planner LLM call (no action) falls through to chat() with
+            # custom_config mutated to inject the planner prompt + json output.
+            if parsed_data.get("action"):
+                return await handle_todo_mode(
+                    parsed_data=parsed_data,
+                    bridge_configurations=bridge_configurations,
+                )
+            await prepare_planner_request(parsed_data, bridge_configurations, custom_config)
 
         # Execute with retry mechanism
         class_obj = await Helper.create_service_handler(params, parsed_data["service"])
@@ -287,6 +293,17 @@ async def chat(request_body):
 
         # Streaming is SSE-only: if stream=true return StreamingResponse.
         if getattr(class_obj, "stream_mode", False) and getattr(class_obj, "streamer", None):
+            # Plan mode (planner call): frontend expects `start` -> `planning`
+            # -> deltas. Emit both up-front so ordering matches the legacy
+            # planner; baseService.stream's own emit_start is idempotent.
+            if parsed_data.get("mode") == "plan" and not parsed_data.get("action"):
+                await class_obj.streamer.emit_start(
+                    model=parsed_data.get("model") or "",
+                    service=parsed_data.get("service") or "",
+                    bridge_id=str(parsed_data.get("bridge_id") or ""),
+                    message_id=str(parsed_data.get("message_id") or ""),
+                )
+                await class_obj.streamer.emit_planning()
             if injected_streamer:
                 # Agent-transfer: existing SSE connection owned by the caller — background task, no new StreamingResponse
                 asyncio.create_task(sse_stream_and_finalize(

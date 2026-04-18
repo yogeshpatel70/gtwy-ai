@@ -761,6 +761,37 @@ async def _update_history_redis(dataset, history_params, version_id, thread_info
         await store_in_cache(cache_key, float(total_tokens))
 
 
+async def _save_plan_from_result(parsed_data, result):
+    """Parse the planner LLM JSON out of `result` and persist the plan to Redis.
+    Also attaches the parsed plan to `historyParams["plans"]` so the history
+    row carries the same `plans` field the legacy todo_handler used to save.
+    """
+    from src.services.todo import plan_store
+    from src.services.todo.planner_service import _parse_plan_json
+
+    try:
+        response = (result.get("historyParams") or {}).get("response") or result.get("response") or {}
+        content = (response.get("data") or {}).get("content") or ""
+        if not content:
+            return
+        plan_json = _parse_plan_json(content)
+        plan = {
+            "goal": plan_json.get("goal", parsed_data.get("user", "")),
+            "state": "planning",
+            "bridge_id": parsed_data["bridge_id"],
+            "org_id": parsed_data["org_id"],
+            "thread_id": parsed_data["thread_id"],
+            "sub_thread_id": parsed_data.get("sub_thread_id") or parsed_data["thread_id"],
+            "tasks": plan_json.get("tasks", {}),
+            "message_id": parsed_data.get("message_id", ""),
+        }
+        await plan_store.save_plan(plan)
+        if result.get("historyParams") is not None:
+            result["historyParams"]["plans"] = plan
+    except Exception as err:
+        logger.error(f"Failed to save plan from chat result: {err}")
+
+
 async def process_background_tasks(
     parsed_data, result, params, thread_info, transfer_request_id=None, bridge_configurations=None
 ):
@@ -774,6 +805,11 @@ async def process_background_tasks(
     # single final plan result is saved by todo_handler after full execution.
     if parsed_data.get("skip_history"):
         return
+
+    # Plan mode: parse the LLM JSON, save to Redis, and thread the parsed plan
+    # into historyParams so the conversation log persists `plans`.
+    if parsed_data.get("mode") == "plan" and not parsed_data.get("action"):
+        await _save_plan_from_result(parsed_data, result)
 
     orchestrator_flag = parsed_data.get("orchestrator_flag") or parsed_data.get("body", {}).get("orchestrator_flag")
 
