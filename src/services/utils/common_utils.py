@@ -1387,12 +1387,14 @@ async def process_background_tasks_for_playground(result, parsed_data):
             new_testcase_id = str(ObjectId())
             result["response"]["testcase_id"] = new_testcase_id
             parsed_data["testcase_data"]["testcase_id"] = new_testcase_id
-            await sendResponse(
-                parsed_data["body"]["bridge_configurations"]["playground_response_format"],
-                parsed_data["testcase_data"],
-                success=True,
-                variables=parsed_data.get("variables", {}),
-            )
+            playground_response_format = parsed_data.get("body", {}).get("bridge_configurations", {}).get("playground_response_format")
+            if playground_response_format:
+                await sendResponse(
+                    playground_response_format,
+                    parsed_data["testcase_data"],
+                    success=True,
+                    variables=parsed_data.get("variables", {}),
+                )
 
             # Add the generated ID to testcase_data for the background task
 
@@ -1490,11 +1492,19 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                 if class_obj.streamer:
                     await class_obj.streamer.emit_error(original_error, fallback_error=str(retry_err))
                     await class_obj.streamer.close()
+                if not parsed_data.get("is_playground"):
+                    await sendResponse(
+                        parsed_data.get("response_format"), str(retry_err), variables=parsed_data.get("variables", {})
+                    ) if (parsed_data.get("response_format") or {}).get("type") not in (None, "default") else None
                 return
         else:
             if class_obj.streamer:
                 await class_obj.streamer.emit_error(original_error)
                 await class_obj.streamer.close()
+            if not parsed_data.get("is_playground"):
+                await sendResponse(
+                    parsed_data.get("response_format"), original_error, variables=parsed_data.get("variables", {})
+                ) if (parsed_data.get("response_format") or {}).get("type") not in (None, "default") else None
             return
 
     template_data = render_template_if_applicable(parsed_data, result)
@@ -1584,6 +1594,12 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
             if result.get("response") and result["response"].get("data"):
                 result["response"]["data"]["message_id"] = parsed_data["message_id"]
             update_usage_metrics(parsed_data, params, latency, result=result, success=True)
+            await sendResponse(
+                parsed_data.get("response_format"),
+                result["response"],
+                success=True,
+                variables=parsed_data.get("variables", {}),
+            )
             await process_background_tasks(
                 parsed_data, result, params, thread_info, transfer_request_id, bridge_configurations
             )
