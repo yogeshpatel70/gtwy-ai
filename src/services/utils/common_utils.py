@@ -1464,7 +1464,8 @@ async def process_background_tasks_for_playground(result, parsed_data):
             new_testcase_id = str(ObjectId())
             result["response"]["testcase_id"] = new_testcase_id
             parsed_data["testcase_data"]["testcase_id"] = new_testcase_id
-            playground_response_format = parsed_data.get("body", {}).get("bridge_configurations", {}).get("playground_response_format")
+            channel_id = f"{parsed_data.get('org_id')}_{parsed_data.get('bridge_id')}_{parsed_data.get('version_id')}"
+            playground_response_format = {"type": "RTLayer", "cred": {"channel": channel_id, "ttl": 1, "apikey": Config.RTLAYER_AUTH}}
             if playground_response_format:
                 await sendResponse(
                     playground_response_format,
