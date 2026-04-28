@@ -1201,8 +1201,7 @@ def restructure_json_schema(response_type, service):
     
     match service:
         case "openai":
-            schema = response_type.get("json_schema", {})
-            del response_type["json_schema"]
+            schema = response_type.pop("json_schema", {})
             for key, value in schema.items():
                 response_type[key] = value
             return response_type
