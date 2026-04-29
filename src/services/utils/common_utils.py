@@ -38,55 +38,56 @@ from src.services.utils.rich_text_support import process_chatbot_response
 from src.db_services.orchestrator_history_service import orchestrator_collector
 from src.services.utils.api_key_status_helper import mark_apikey_status_from_response
 
-def setup_agent_pre_tools(parsed_data, bridge_configurations):
-    """
-    Setup pre_tools for the current agent with its own variables.
-    Populates resolved args for each pre-tool from agent variables.
-    """
+def setup_agent_tools(parsed_data, bridge_configurations, tool_data):
     current_bridge_id = parsed_data.get("bridge_id")
-    if not current_bridge_id or not bridge_configurations:
+    if not current_bridge_id or not bridge_configurations or not tool_data:
         return
-
-    current_config = bridge_configurations.get(current_bridge_id, {})
-    pre_tools_list = current_config.get("pre_tools_data") or []
     agent_variables = parsed_data.get("variables", {})
-    if not pre_tools_list:
-        return
-    resolved_pre_tools = []
-    for pre_tool in pre_tools_list:
-        tool_type = pre_tool.get("_type")
-        tool_config = pre_tool.get("config", {})
-        tool_args_mapping = pre_tool.get("args", {})  # param -> agent_variable_name
-        resolved_args = dict(tool_config)
 
+    def resolve_args(tool_config, tool_args_mapping, is_custom=False):
+        resolved = dict(tool_config)
         for param, var_name in tool_args_mapping.items():
             if var_name in agent_variables:
-                resolved_args[param] = agent_variables[var_name]
-            elif tool_type != "custom_function":
-                resolved_args[param] = var_name
-        if tool_type == "custom_function":
-            function_data = pre_tool.get("function_data", {})
-            required_params = tool_config.get("required_params", [])
-            for param in required_params:
-                if param not in resolved_args:
-                    if param in agent_variables:
-                        resolved_args[param] = agent_variables[param]
-            resolved_pre_tools.append({
-                "type": "custom_function",
-                "name":  tool_config.get("script_id"),
-                "args": resolved_args,
-            })
-        else:
-            resolved_pre_tools.append({
-                "type": tool_type,
-                "args": resolved_args,
-                "config": tool_config,
-                
-                
-            })
+                resolved[param] = agent_variables[var_name]
+            elif not is_custom:
+                resolved[param] = var_name
+        for param in tool_config.get("required_params", []):
+            if param not in resolved and param in agent_variables:
+                resolved[param] = agent_variables[param]
+        return resolved
 
-    parsed_data["pre_tools"] = resolved_pre_tools
-
+    resolved_tools = []
+    if isinstance(tool_data, list):
+        tool = tool_data[0]
+    else:
+        tool_config = tool_data.get("config", {})
+        tool_args_mapping = tool_data.get("args", {})
+        resolved_args = resolve_args(tool_config, tool_args_mapping)
+        return {
+            **tool_data,
+            "args": resolved_args,
+            "config": tool_config
+        }
+    tool_type = tool.get("_type")
+    tool_config = tool.get("config", {})
+    tool_args_mapping = tool.get("args", {})
+    is_custom = tool_type == "custom_function"
+    resolved_args = resolve_args(tool_config, tool_args_mapping, is_custom)
+    if is_custom:
+        resolved_tools.append({
+            "type": "custom_function",
+            "name": tool_config.get("script_id"),
+            "args": resolved_args,
+        })
+    else:
+        resolved_tools.append({
+            "type": tool_type,
+            "args": resolved_args,
+            "config": tool_config,
+        })
+    
+    return resolved_tools
+    
 async def handle_agent_transfer(
     result, request_body, bridge_configurations, chat_function, current_bridge_id=None, transfer_request_id=None
 ):
@@ -221,6 +222,7 @@ def parse_request_body(request_body):
         "guardrails": body.get("settings", {}).get("guardrails") or {},
         "testcase_data": body.get("testcase_data") or {},
         "is_embed": body.get("is_embed"),
+        "post_tool_data": body.get("post_tool_data"),
         "user_id": body.get("user_id"),
         "file_data": body.get("video_data") or {},
         "youtube_url": body.get("youtube_url") or None,
@@ -498,6 +500,42 @@ async def handle_pre_tools(parsed_data, custom_config):
                 response = web_response.get('response')
                 error_msg = f"Error: {response.get('error', 'unknown error') if isinstance(response, dict) else response or 'unknown error'}"
                 parsed_data["variables"]["web_search_pre_result"] = error_msg
+
+async def handle_post_tool(parsed_data, result):
+    """Execute the folder-level post_tool after every AI call (embed only).
+    Awaited directly; returns the post function response to allow the caller to override the AI response."""
+
+    post_tool_data = parsed_data.get("post_tool_data")
+    if not post_tool_data:
+        return
+
+
+    script_id = post_tool_data.get("script_id") or post_tool_data.get("function_name") or post_tool_data.get("endpoint_name")
+    if not script_id:
+        logger.warning("post_tool configured but no script_id / function_name found; skipping")
+        return
+
+    try:
+        args = {
+            **dict(post_tool_data.get("args", {})),
+            "user": parsed_data.get("user"),
+            "_response_type": parsed_data.get("configuration", {}).get("response_type"),
+            "bridge_id": parsed_data.get("bridge_id"),
+            "thread_id": parsed_data.get("thread_id"),
+            "org_id": parsed_data.get("org_id"),
+        }
+        response_data = (result or {}).get("response", {}).get("data") if isinstance(result, dict) else None
+        if response_data:
+            args["ai_response"] = response_data.get("content") or response_data
+
+        post_function_response = await axios_work(
+            args,
+            {"url": f"https://flow.sokt.io/func/{script_id}"},
+        )
+    except Exception as err:
+        logger.error(f"post_tool execution error (script_id={script_id}): {err}")
+    return post_function_response
+
 async def manage_threads(parsed_data):
     thread_id = parsed_data["thread_id"]
     sub_thread_id = parsed_data["sub_thread_id"]
@@ -1750,6 +1788,12 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                 or model_response.get("status")
                 or ""
             )
+            post_tool_response = await handle_post_tool(parsed_data, result)
+            if post_tool_response and post_tool_response.get("status") == 1 and post_tool_response.get("response") is not None:
+                if formatted_response.get("data") is not None:
+                    formatted_response["data"]["content"] = post_tool_response.get("response")
+                if result.get("response", {}).get("data") is not None:
+                    result["response"]["data"]["content"] = post_tool_response.get("response")
             if not is_nested_stream_call:
                 accumulated_payload = None if template_data else formatted_response
                 await class_obj.streamer.emit_done(
@@ -1759,6 +1803,7 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                     accumulated_data=accumulated_payload,
                 )
                 await class_obj.streamer.close()
+            
         return {"success": True, "response": result.get("response", {})}
     except Exception as err:
         logger.error(f"SSE finalization error: {str(err)}, {tb.format_exc()}")
