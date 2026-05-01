@@ -1044,7 +1044,7 @@ async def process_background_tasks(
     data = await make_request_data_and_publish_sub_queue(parsed_data, result, params, thread_info)
 
     if history_entries:
-        _attach_sub_thread_extras(history_entries[0]["conversation_log_data"], parsed_data)
+        _attach_sub_thread_extras(history_entries[0], parsed_data)
         data["save_history"] = history_entries
 
         asyncio.gather(

@@ -45,7 +45,6 @@ from src.services.utils.common_utils import (
     sse_stream_and_finalize,
     render_template_if_applicable,
 )
-from src.services.utils.guardrails_validator import guardrails_check
 from src.services.utils.rich_text_support import process_chatbot_response
 from src.services.auto_router_service import apply_auto_model_selection
 from ..utils.ai_middleware_format import Response_formatter
@@ -189,11 +188,6 @@ async def chat(request_body):
         # Initialize transfer history for this request if not exists
         if transfer_request_id not in TRANSFER_HISTORY:
             TRANSFER_HISTORY[transfer_request_id] = []
-        if parsed_data.get("settings", {}).get("guardrails", {}).get("is_enabled", False):
-            guardrails_result = await guardrails_check(parsed_data)
-            if guardrails_result is not None:
-                # Content was blocked by guardrails, return the blocked response
-                return JSONResponse(status_code=200, content=guardrails_result)
 
         parsed_data["configuration"]["prompt"] = add_default_template(
             parsed_data.get("configuration", {}).get("prompt", "")
