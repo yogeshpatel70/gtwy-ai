@@ -551,6 +551,11 @@ async def chat(request_body):
             result.setdefault("response", {}).setdefault("usage", {})
             result["response"]["usage"]["cost"] = parsed_data["usage"].get("expectedCost", 0)
 
+        # Run post_tool for both playground and non-playground
+        post_tool_response = await handle_post_tool(parsed_data, result)
+        if post_tool_response and post_tool_response.get("status") == 1 and post_tool_response.get("response") is not None:
+            result["response"]["data"]["content"] = post_tool_response.get("response")
+
         # Send data to playground (after review so playground sees final response)
         if parsed_data.get("is_playground") and parsed_data.get("body", {}).get("bridge_configurations", {}).get(
             "playground_response_format"
@@ -565,9 +570,6 @@ async def chat(request_body):
         if not parsed_data["is_playground"]:
             if result.get("response") and result["response"].get("data"):
                 result["response"]["data"]["message_id"] = parsed_data["message_id"]
-            post_tool_response = await handle_post_tool(parsed_data, result)
-            if post_tool_response and post_tool_response.get("status") == 1 and post_tool_response.get("response") is not None:
-                result["response"]["data"]["content"] = post_tool_response.get("response")
             await sendResponse(
                 parsed_data["response_format"],
                 result["response"],
