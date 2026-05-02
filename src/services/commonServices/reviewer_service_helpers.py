@@ -21,6 +21,7 @@ from globals import logger
 from src.services.cache_service import make_json_serializable
 from src.services.commonServices.baseService.utils import make_request_data_and_publish_sub_queue
 from src.services.commonServices.queueService.queueLogService import sub_queue_obj
+from src.services.commonServices.queueService.queueMetricsService import metrics_queue_obj
 from src.services.utils.common_utils import (
     _attach_sub_thread_extras,
     build_service_params,
@@ -182,14 +183,17 @@ async def _publish_reviewer_round(
       multiple times per main turn.
     """
     try:
+        conversation_log_data = history_payload["conversation_log_data"]
+        metrics_data = history_payload.get("metrics_data", [])
+
         # Attach thread_flag and response_format to the conversation_log row.
         if reviewer_parsed_data is not None:
-            _attach_sub_thread_extras(history_payload["conversation_log_data"], reviewer_parsed_data)
+            _attach_sub_thread_extras(conversation_log_data, reviewer_parsed_data)
         else:
             # Hard-exception rounds have no reviewer parsed_data — synthesize the
             # two extras so the saved row is still well-formed on the Node side.
-            history_payload["conversation_log_data"]["thread_flag"] = None
-            history_payload["conversation_log_data"]["response_format"] = {"type": "default"}
+            conversation_log_data["thread_flag"] = None
+            conversation_log_data["response_format"] = {"type": "default"}
 
         send_full_payload = (
             is_final
@@ -202,14 +206,18 @@ async def _publish_reviewer_round(
             data = await make_request_data_and_publish_sub_queue(
                 reviewer_parsed_data, reviewer_result, reviewer_params, thread_info=None
             )
-            data["save_history"] = [history_payload]
+            data["save_history"] = [conversation_log_data]
             message = make_json_serializable(data)
             kind = "final, full payload"
         else:
-            message = make_json_serializable({"save_history": [history_payload]})
+            message = make_json_serializable({"save_history": [conversation_log_data]})
             kind = "final, history-only" if is_final else "intermediate"
 
         await sub_queue_obj.publish_message(message)
+        if metrics_data:
+            await metrics_queue_obj.publish_message(
+                make_json_serializable({"save_metrics": metrics_data})
+            )
         logger.info(
             f"Published reviewer round {round_num} ({kind}) for bridge {bridge_id} "
             f"(error={error!r})"
