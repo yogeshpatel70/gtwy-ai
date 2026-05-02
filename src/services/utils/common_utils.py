@@ -1792,12 +1792,6 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                 or model_response.get("status")
                 or ""
             )
-            post_tool_response = await handle_post_tool(parsed_data, result)
-            if post_tool_response and post_tool_response.get("status") == 1 and post_tool_response.get("response") is not None:
-                if formatted_response.get("data") is not None:
-                    formatted_response["data"]["content"] = post_tool_response.get("response")
-                if result.get("response", {}).get("data") is not None:
-                    result["response"]["data"]["content"] = post_tool_response.get("response")
             if not is_nested_stream_call:
                 accumulated_payload = None if template_data else formatted_response
                 await class_obj.streamer.emit_done(
