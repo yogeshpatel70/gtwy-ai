@@ -61,6 +61,7 @@ class BaseService:
         self.playground = params.get("playground")
         self.template = params.get("template")
         self.response_format = params.get("response_format")
+        self.thread_flag = params.get("thread_flag")
         self.execution_time_logs = params.get("execution_time_logs", {})
         self.timer = params.get("timer")
         self.func_tool_call_data = []
@@ -297,8 +298,11 @@ class BaseService:
             "message_id": self.message_id,
         }
         payload = metrics_service.build_history_and_metrics_payload([usage], history_params, None)
+        history_data = payload["conversation_log_data"]
+        history_data["thread_flag"] = self.thread_flag
+        history_data["response_format"] = self.response_format
         await asyncio.gather(
-            sub_queue_obj.publish_message(make_json_serializable({"save_history": [payload]})),
+            sub_queue_obj.publish_message(make_json_serializable({"save_history": [history_data]})),
             sendResponse(self.response_format, data=response.get("error")),
             return_exceptions=True,
         )
