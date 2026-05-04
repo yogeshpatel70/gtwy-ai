@@ -177,7 +177,7 @@ async def chat(request_body):
         current_agent_id = parsed_data.get("bridge_id")
         pre_tools = bridge_configurations.get(current_agent_id, {}).get("pre_tools_data", [])
         post_tool = bridge_configurations.get(current_agent_id, {}).get("post_tool_data", {})
-        parsed_data["pre_tool_data"] = setup_agent_tools(parsed_data, bridge_configurations, pre_tools)
+        parsed_data["pre_tools"] = setup_agent_tools(parsed_data, bridge_configurations, pre_tools)
         parsed_data["post_tool_data"] = setup_agent_tools(parsed_data, bridge_configurations, post_tool)
         await apply_prompt_wrapper(parsed_data)
 
@@ -566,6 +566,8 @@ async def chat(request_body):
                 success=True,
                 variables=parsed_data.get("variables", {}),
             )
+         
+        await handle_post_tool(parsed_data, result)
 
         if not parsed_data["is_playground"]:
             if result.get("response") and result["response"].get("data"):
