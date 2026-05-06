@@ -184,6 +184,16 @@ async def _prepare_configuration_response(
                 "config": tool_config,
                 "args": tool_args,
             })
+    raw_post_tool = result.get("bridges", {}).get("folder_post_tool") or {}
+    raw_post_tool_script_id = raw_post_tool.get('script_id', {}) if raw_post_tool else {}
+    post_tool_data = None
+    if raw_post_tool:
+        variables_path_post_tool = bridge.get("variables_path", {}).get(raw_post_tool_script_id, {})
+        post_tool_data = {
+            **raw_post_tool,
+            "args": variables_path_post_tool,
+            "config": raw_post_tool.get("config", {}),
+        }
 
     rag_data = bridge.get("doc_ids")
     gpt_memory_context = bridge.get("gpt_memory_context")
@@ -215,6 +225,7 @@ async def _prepare_configuration_response(
     base_config = {
         "configuration": configuration,
         "pre_tools_data": pre_tools_data_for_later,
+        "post_tool_data": post_tool_data,
         "service": service,
         "apikey": apikey,
         "auto_model_select": auto_model_select,
@@ -247,6 +258,7 @@ async def _prepare_configuration_response(
         "chatbot_auto_answers": chatbot_auto_answers,
         "cache_on": cache_on,
         "richui_templates": result.get("bridges", {}).get("richui_templates"),
+        "meta": bridge_data.get("meta") or bridge_data.get("bridges", {}).get("meta"),
         "reviewer_agent": str(
             result.get("bridges", {}).get("settings", {}).get("reviewer_agent") or ""
         ),

@@ -25,6 +25,7 @@ from src.services.utils.common_utils import (
     filter_missing_vars,
     handle_agent_transfer,
     handle_fine_tune_model,
+    handle_post_tool,
     handle_pre_tools,
     initialize_timer,
     load_model_configuration,
@@ -37,14 +38,13 @@ from src.services.utils.common_utils import (
     process_variable_state,
     restructure_json_schema,
     validate_json_schema_configuration,
-    setup_agent_pre_tools,
+    setup_agent_tools,
     update_usage_metrics,
     process_batch_background_tasks,
     update_cost_usage_and_apikey_status_in_background,
     sse_stream_and_finalize,
     render_template_if_applicable,
 )
-from src.services.utils.guardrails_validator import guardrails_check
 from src.services.utils.rich_text_support import process_chatbot_response
 from src.services.auto_router_service import apply_auto_model_selection
 from ..utils.ai_middleware_format import Response_formatter
@@ -173,8 +173,12 @@ async def chat(request_body):
         # To maintain the API Key status for the original service, because it gets overrited when Fallback is used
         original_service = parsed_data["service"]
         
-        # Setup pre_tools for the current agent with its own variables
-        setup_agent_pre_tools(parsed_data, bridge_configurations)
+        # Setup pre_tools and post_tool for the current agent with its own variables
+        current_agent_id = parsed_data.get("bridge_id")
+        pre_tools = bridge_configurations.get(current_agent_id, {}).get("pre_tools_data", [])
+        post_tool = bridge_configurations.get(current_agent_id, {}).get("post_tool_data", {})
+        parsed_data["pre_tools"] = setup_agent_tools(parsed_data, bridge_configurations, pre_tools)
+        parsed_data["post_tool_data"] = setup_agent_tools(parsed_data, bridge_configurations, post_tool)
         await apply_prompt_wrapper(parsed_data)
 
         # Initialize or retrieve transfer_request_id for tracking transfers
@@ -184,11 +188,6 @@ async def chat(request_body):
         # Initialize transfer history for this request if not exists
         if transfer_request_id not in TRANSFER_HISTORY:
             TRANSFER_HISTORY[transfer_request_id] = []
-        if parsed_data.get("settings", {}).get("guardrails", {}).get("is_enabled", False):
-            guardrails_result = await guardrails_check(parsed_data)
-            if guardrails_result is not None:
-                # Content was blocked by guardrails, return the blocked response
-                return JSONResponse(status_code=200, content=guardrails_result)
 
         parsed_data["configuration"]["prompt"] = add_default_template(
             parsed_data.get("configuration", {}).get("prompt", "")
@@ -552,6 +551,11 @@ async def chat(request_body):
             result.setdefault("response", {}).setdefault("usage", {})
             result["response"]["usage"]["cost"] = parsed_data["usage"].get("expectedCost", 0)
 
+        # Run post_tool for both playground and non-playground
+        post_tool_response = await handle_post_tool(parsed_data, result)
+        if post_tool_response and post_tool_response.get("status") == 1 and post_tool_response.get("response") is not None:
+            result["response"]["data"]["content"] = post_tool_response.get("response")
+
         # Send data to playground (after review so playground sees final response)
         if parsed_data.get("is_playground") and parsed_data.get("body", {}).get("bridge_configurations", {}).get(
             "playground_response_format"
@@ -571,6 +575,7 @@ async def chat(request_body):
                 result["response"],
                 success=True,
                 variables=parsed_data.get("variables", {}),
+                meta=parsed_data.get("meta"),
             )
 
             # Process background tasks (handles both transfer and non-transfer cases)
@@ -622,7 +627,7 @@ async def chat(request_body):
             # Create history parameters
             parsed_data["historyParams"] = create_history_params(parsed_data, error, class_obj)
             await sendResponse(
-                parsed_data["response_format"], result.get("error", str(error)), variables=parsed_data["variables"]
+                parsed_data["response_format"], result.get("error", str(error)), variables=parsed_data["variables"], meta=parsed_data.get("meta")
             ) if parsed_data["response_format"]["type"] != "default" else None
             # Process background tasks for error handling
             await process_background_tasks_for_error(parsed_data, error)
@@ -894,7 +899,7 @@ async def image(request_body):
         if result.get("response") and result["response"].get("data"):
             result["response"]["data"]["id"] = parsed_data["message_id"]
         await sendResponse(
-            parsed_data["response_format"], result["response"], success=True, variables=parsed_data.get("variables", {})
+            parsed_data["response_format"], result["response"], success=True, variables=parsed_data.get("variables", {}), meta=parsed_data.get("meta")
         )
         latency = create_latency_object(timer, params)
         if not parsed_data["is_playground"]:
@@ -926,7 +931,7 @@ async def image(request_body):
                 parsed_data, error, class_obj, thread_info if "thread_info" in locals() else None
             )
             await sendResponse(
-                parsed_data["response_format"], result.get("error", str(error)), variables=parsed_data["variables"]
+                parsed_data["response_format"], result.get("error", str(error)), variables=parsed_data["variables"], meta=parsed_data.get("meta")
             ) if parsed_data["response_format"]["type"] != "default" else None
             # Process background tasks for error handling
             await process_background_tasks_for_error(parsed_data, error)
