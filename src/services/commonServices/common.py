@@ -566,8 +566,6 @@ async def chat(request_body):
                 success=True,
                 variables=parsed_data.get("variables", {}),
             )
-         
-        await handle_post_tool(parsed_data, result)
 
         if not parsed_data["is_playground"]:
             if result.get("response") and result["response"].get("data"):
