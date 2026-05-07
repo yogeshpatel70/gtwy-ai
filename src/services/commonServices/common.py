@@ -158,6 +158,8 @@ async def chat(request_body):
         # To maintain the API Key status for the original service, because it gets overrited when Fallback is used
         original_service = parsed_data["service"]
         
+        process_variable_state(parsed_data)
+        
         # Setup pre_tools for the current agent with its own variables
         setup_agent_pre_tools(parsed_data, bridge_configurations)
         await apply_prompt_wrapper(parsed_data)
@@ -206,8 +208,6 @@ async def chat(request_body):
                 parsed_data["thread_id"], parsed_data["sub_thread_id"], parsed_data["bridge_id"]
             )
 
-        # Step 6: Check and add default values for variables based on variable_state
-        process_variable_state(parsed_data)
 
         # Step 7: Prepare Prompt, Variables and Memory
         memory, missing_vars = await prepare_prompt(parsed_data, thread_info, model_config, custom_config)
