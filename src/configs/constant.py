@@ -101,3 +101,9 @@ alert_types = {
     "retry_mechanism": "retry_mechanism",
     "broadcast_response": "broadcast_response",
 }
+
+auto_model_tradeoff = {
+    "quality": None,
+    "cost": "cost",
+    "speed": "latency"
+}
