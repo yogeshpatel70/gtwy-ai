@@ -10,7 +10,6 @@ from config import Config
 from globals import TRANSFER_HISTORY, BadRequestException, logger, try_catch
 from src.configs.model_configuration import model_config_document
 from src.configs.serviceKeys import model_config_change
-from src.controllers.conversationController import save_sub_thread_id_and_name
 from src.db_services.metrics_service import (
     build_history_and_metrics_payload,
     build_orchestrator_log_data,
@@ -20,6 +19,7 @@ from src.services.cache_service import find_in_cache, store_in_cache, make_json_
 from src.configs.constant import bridge_ids, redis_keys, alert_types
 from src.services.commonServices.baseService.utils import axios_work, make_request_data_and_publish_sub_queue, remove_additional_properties_with_anyof
 from src.services.commonServices.queueService.queueLogService import sub_queue_obj
+from src.services.commonServices.queueService.queueMetricsService import metrics_queue_obj
 from src.services.proxy.Proxyservice import get_timezone_and_org_name
 from src.send_alert import send_alert
 from src.services.utils.apiservice import fetch
@@ -38,55 +38,56 @@ from src.services.utils.rich_text_support import process_chatbot_response
 from src.db_services.orchestrator_history_service import orchestrator_collector
 from src.services.utils.api_key_status_helper import mark_apikey_status_from_response
 
-def setup_agent_pre_tools(parsed_data, bridge_configurations):
-    """
-    Setup pre_tools for the current agent with its own variables.
-    Populates resolved args for each pre-tool from agent variables.
-    """
+def setup_agent_tools(parsed_data, bridge_configurations, tool_data):
     current_bridge_id = parsed_data.get("bridge_id")
-    if not current_bridge_id or not bridge_configurations:
+    if not current_bridge_id or not bridge_configurations or not tool_data:
         return
-
-    current_config = bridge_configurations.get(current_bridge_id, {})
-    pre_tools_list = current_config.get("pre_tools_data") or []
     agent_variables = parsed_data.get("variables", {})
-    if not pre_tools_list:
-        return
-    resolved_pre_tools = []
-    for pre_tool in pre_tools_list:
-        tool_type = pre_tool.get("_type")
-        tool_config = pre_tool.get("config", {})
-        tool_args_mapping = pre_tool.get("args", {})  # param -> agent_variable_name
-        resolved_args = dict(tool_config)
 
+    def resolve_args(tool_config, tool_args_mapping, is_custom=False):
+        resolved = dict(tool_config)
         for param, var_name in tool_args_mapping.items():
             if var_name in agent_variables:
-                resolved_args[param] = agent_variables[var_name]
-            elif tool_type != "custom_function":
-                resolved_args[param] = var_name
-        if tool_type == "custom_function":
-            function_data = pre_tool.get("function_data", {})
-            required_params = tool_config.get("required_params", [])
-            for param in required_params:
-                if param not in resolved_args:
-                    if param in agent_variables:
-                        resolved_args[param] = agent_variables[param]
-            resolved_pre_tools.append({
-                "type": "custom_function",
-                "name":  tool_config.get("script_id"),
-                "args": resolved_args,
-            })
-        else:
-            resolved_pre_tools.append({
-                "type": tool_type,
-                "args": resolved_args,
-                "config": tool_config,
-                
-                
-            })
+                resolved[param] = agent_variables[var_name]
+            elif not is_custom:
+                resolved[param] = var_name
+        for param in tool_config.get("required_params", []):
+            if param not in resolved and param in agent_variables:
+                resolved[param] = agent_variables[param]
+        return resolved
 
-    parsed_data["pre_tools"] = resolved_pre_tools
-
+    resolved_tools = []
+    if isinstance(tool_data, list):
+        tool = tool_data[0]
+    else:
+        tool_config = tool_data.get("config", {})
+        tool_args_mapping = tool_data.get("args", {})
+        resolved_args = resolve_args(tool_config, tool_args_mapping)
+        return {
+            **tool_data,
+            "args": resolved_args,
+            "config": tool_config
+        }
+    tool_type = tool.get("_type")
+    tool_config = tool.get("config", {})
+    tool_args_mapping = tool.get("args", {})
+    is_custom = tool_type == "custom_function"
+    resolved_args = resolve_args(tool_config, tool_args_mapping, is_custom)
+    if is_custom:
+        resolved_tools.append({
+            "type": "custom_function",
+            "name": tool_config.get("script_id"),
+            "args": resolved_args,
+        })
+    else:
+        resolved_tools.append({
+            "type": tool_type,
+            "args": resolved_args,
+            "config": tool_config,
+        })
+    
+    return resolved_tools
+    
 async def handle_agent_transfer(
     result, request_body, bridge_configurations, chat_function, current_bridge_id=None, transfer_request_id=None
 ):
@@ -189,6 +190,7 @@ def parse_request_body(request_body):
         "type": body.get("configuration", {}).get("type"),
         "apikey_object_id": body.get("apikey_object_id"),
         "apikey_status": body.get('apikey_status'),
+        "is_request_apikey": body.get("is_request_apikey", False),
         "audios": [
             url.get("url")
             for url in body.get("user_urls", [])
@@ -220,6 +222,7 @@ def parse_request_body(request_body):
         "guardrails": body.get("settings", {}).get("guardrails") or {},
         "testcase_data": body.get("testcase_data") or {},
         "is_embed": body.get("is_embed"),
+        "post_tool_data": body.get("post_tool_data"),
         "user_id": body.get("user_id"),
         "file_data": body.get("video_data") or {},
         "youtube_url": body.get("youtube_url") or None,
@@ -233,6 +236,7 @@ def parse_request_body(request_body):
         "cache_on": body.get("cache_on"),
         "owner_id": state.get("profile", {}).get("owner_id"),
         "richui_templates": body.get("richui_templates", {}),
+        "meta": body.get("meta"),
         "limit": body.get("limit"),
         "is_rerun": body.get("is_rerun", False),
     }
@@ -405,7 +409,8 @@ async def load_model_configuration(model, configuration, service):
         ):
             if config.get("level") == 0 and key not in configuration:
                 continue
-            custom_config[key] = configuration.get(key, config["default"])
+            if configuration.get(key):
+                custom_config[key] = configuration[key]
 
     return model_obj, custom_config, model_output_config
 
@@ -496,6 +501,56 @@ async def handle_pre_tools(parsed_data, custom_config):
                 response = web_response.get('response')
                 error_msg = f"Error: {response.get('error', 'unknown error') if isinstance(response, dict) else response or 'unknown error'}"
                 parsed_data["variables"]["web_search_pre_result"] = error_msg
+
+
+async def handle_post_tool(parsed_data, result):
+    """Execute the folder-level post_tool after every AI call."""
+    post_tool_data = parsed_data.get("post_tool_data")
+    if not post_tool_data:
+        return
+
+    script_id = post_tool_data.get("script_id") or post_tool_data.get("function_name") or post_tool_data.get("endpoint_name")
+    if not script_id:
+        logger.warning("post_tool configured but no script_id / function_name found; skipping")
+        return
+
+    try:
+        args = {
+            **dict(post_tool_data.get("args", {})),
+            "user": parsed_data.get("user"),
+            "_response_type": parsed_data.get("configuration", {}).get("response_type"),
+            "bridge_id": parsed_data.get("bridge_id"),
+            "thread_id": parsed_data.get("thread_id"),
+            "org_id": parsed_data.get("org_id"),
+        }
+        response_data = (result or {}).get("response", {}).get("data") if isinstance(result, dict) else None
+        if response_data:
+            args["ai_response"] = response_data.get("content") or response_data
+
+        post_tool_response = await axios_work(
+            args,
+            {"url": f"https://flow.sokt.io/func/{script_id}"},
+        )
+    except Exception as err:
+        logger.error(f"post_tool execution error (script_id={script_id}): {err}")
+        return
+
+    flow_hit_id = (post_tool_response.get("metadata") or {}).get("flowHitId")
+    entry = {
+        "id": post_tool_data.get("script_id"),
+        "args": post_tool_data.get("args", {}),
+        "data": post_tool_response,
+        "type": "post_tool",
+        "name": post_tool_data.get("title") or post_tool_data.get("script_id"),
+        "error": post_tool_response.get("status") != 1,
+    }
+    post_tool_log = {flow_hit_id: entry} if flow_hit_id else entry
+    if result is not None and result.get("historyParams") is not None:
+        result["historyParams"].setdefault("tools_call_data", []).append(post_tool_log)
+    if post_tool_response.get("status") == 1 and post_tool_response.get("response") is not None:
+        if isinstance(result, dict) and result.get("response", {}).get("data") is not None:
+            result["response"]["data"]["content"] = post_tool_response.get("response")
+
 async def manage_threads(parsed_data):
     thread_id = parsed_data["thread_id"]
     sub_thread_id = parsed_data["sub_thread_id"]
@@ -673,6 +728,7 @@ def build_service_params(
         "playground": parsed_data["is_playground"],
         "template": parsed_data["template"],
         "response_format": parsed_data.get("response_format") or {},
+        "thread_flag": parsed_data.get("thread_flag"),
         "execution_time_logs": parsed_data.get("execution_time_logs", []),
         "function_time_logs": [],
         "timer": timer,
@@ -703,20 +759,41 @@ def build_service_params(
         "is_embed": parsed_data.get("is_embed"),
         "user_id": parsed_data.get("user_id"),
         "api_collection": parsed_data.get("api_collection"),
+        "meta": parsed_data.get("meta"),
     }
 
 
-async def _publish_history_to_queue(dataset, history_params, version_id, thread_info=None):
+def _attach_sub_thread_extras(conversation_log_data, parsed_data):
+    conversation_log_data["thread_flag"] = parsed_data.get("thread_flag")
+    conversation_log_data["response_format"] = parsed_data.get("response_format")
+
+
+def _build_orchestrator_sub_thread_data(parsed_data, thread_info=None):
+    return {
+        "org_id": parsed_data.get("org_id"),
+        "thread_id": (thread_info or {}).get("thread_id") or parsed_data.get("thread_id"),
+        "sub_thread_id": (thread_info or {}).get("sub_thread_id") or parsed_data.get("sub_thread_id"),
+        "thread_flag": parsed_data.get("thread_flag"),
+        "response_format": parsed_data.get("response_format"),
+        "bridge_id": parsed_data.get("bridge_id"),
+        "user": parsed_data.get("user"),
+    }
+
+
+async def _publish_history_to_queue(dataset, history_params, version_id, thread_info=None, parsed_data=None):
     """Build history/metrics payload and publish it to the log queue for Node.js to save."""
     try:
         payload = build_history_and_metrics_payload(dataset, history_params, version_id)
-        message = make_json_serializable({"save_history": [payload]})
-        await sub_queue_obj.publish_message(message)
+        if parsed_data is not None:
+            _attach_sub_thread_extras(payload["conversation_log_data"], parsed_data)
+        metrics_data = payload["metrics_data"]
+        history_data = payload["conversation_log_data"]
+        await sub_queue_obj.publish_message(make_json_serializable({"save_history": [history_data]}))
+        await metrics_queue_obj.publish_message(make_json_serializable({"save_metrics": metrics_data}))
 
         asyncio.create_task(_send_history_to_rt_layer(history_params))
-
     except Exception as err:
-        logger.error(f"Error publishing history to queue: {str(err)}")
+        logger.error(f"Error publishing history/metrics to queue: {str(err)}")
 
 
 async def _send_history_to_rt_layer(history_entry):
@@ -763,33 +840,65 @@ async def _update_history_redis(dataset, history_params, version_id, thread_info
 
 async def _save_plan_from_result(parsed_data, result):
     """Parse the planner LLM JSON out of `result` and persist the plan to Redis.
+
+    Safety guarantees:
+    - On replan, merge new tasks with existing plan so completed / answered
+      tasks are never lost even if the LLM forgets to re-emit them.
+    - The original goal is preserved once an existing plan is present.
+    - If the new output is malformed or contains no tasks while an existing
+      plan has tasks, the existing plan is kept intact (never wiped).
+    - Raw content is logged on any failure path so issues are debuggable.
+
     Also attaches the parsed plan to `historyParams["plans"]` so the history
-    row carries the same `plans` field the legacy todo_handler used to save.
+    row carries the same `plans` field todo_handler expects.
     """
     from src.services.todo import plan_store
     from src.services.todo.planner_service import _parse_plan_json
+
+    org_id = parsed_data["org_id"]
+    bridge_id = parsed_data["bridge_id"]
+    thread_id = parsed_data["thread_id"]
+    sub_thread_id = parsed_data.get("sub_thread_id") or thread_id
 
     try:
         response = (result.get("historyParams") or {}).get("response") or result.get("response") or {}
         content = (response.get("data") or {}).get("content") or ""
         if not content:
+            logger.warning(
+                f"Planner returned empty content for thread={thread_id}/sub={sub_thread_id}; keeping any existing plan."
+            )
             return
-        plan_json = _parse_plan_json(content)
-        plan = {
-            "goal": plan_json.get("goal", parsed_data.get("user", "")),
-            "state": "planning",
-            "bridge_id": parsed_data["bridge_id"],
-            "org_id": parsed_data["org_id"],
-            "thread_id": parsed_data["thread_id"],
-            "sub_thread_id": parsed_data.get("sub_thread_id") or parsed_data["thread_id"],
-            "tasks": plan_json.get("tasks", {}),
-            "message_id": parsed_data.get("message_id", ""),
-        }
-        await plan_store.save_plan(plan)
+
+        try:
+            plan_json = _parse_plan_json(content)
+        except Exception as parse_err:
+            logger.error(
+                f"Planner JSON parse failed for thread={thread_id}/sub={sub_thread_id}: {parse_err}. "
+                f"Keeping existing plan if any. Raw content (truncated): {content[:1000]}"
+            )
+            return
+
+        if not isinstance(plan_json, dict):
+            logger.error(
+                f"Planner output is not an object for thread={thread_id}/sub={sub_thread_id}. Keeping existing plan. Got type={type(plan_json).__name__}"
+            )
+            return
+
+        plan_json["org_id"] = org_id
+        plan_json["bridge_id"] = bridge_id
+        plan_json["thread_id"] = thread_id
+        plan_json["sub_thread_id"] = sub_thread_id
+        plan_json["message_id"] = parsed_data.get("message_id", "")
+
+        await plan_store.save_plan(plan_json)
+        logger.info(f"Plan saved for thread={thread_id}/sub={sub_thread_id}.")
         if result.get("historyParams") is not None:
-            result["historyParams"]["plans"] = plan
+            result["historyParams"]["plans"] = plan_json
     except Exception as err:
-        logger.error(f"Failed to save plan from chat result: {err}")
+        logger.error(
+            f"Failed to save plan from chat result for thread={thread_id}/sub={sub_thread_id}: {err}",
+            exc_info=True,
+        )
 
 
 async def process_background_tasks(
@@ -820,6 +929,7 @@ async def process_background_tasks(
     )
 
     history_entries = []
+    metrics_entries = []
     orchestrator_history_data = None
 
     if is_transfer_chain:
@@ -867,7 +977,8 @@ async def process_background_tasks(
                     history_entry["history_params"],
                     history_entry["version_id"],
                 )
-                history_entries.append(payload)
+                metrics_entries.extend(payload["metrics_data"])
+                history_entries.append(payload["conversation_log_data"])
 
                 asyncio.create_task(
                     _update_history_redis(
@@ -890,7 +1001,8 @@ async def process_background_tasks(
             parsed_data["version_id"],
         )
 
-        history_entries.append(payload)
+        metrics_entries.extend(payload["metrics_data"])
+        history_entries.append(payload["conversation_log_data"])
 
         asyncio.create_task(
             _update_history_redis(
@@ -904,6 +1016,7 @@ async def process_background_tasks(
     data = await make_request_data_and_publish_sub_queue(parsed_data, result, params, thread_info)
 
     if history_entries:
+        _attach_sub_thread_extras(history_entries[0], parsed_data)
         data["save_history"] = history_entries
 
         asyncio.gather(
@@ -912,11 +1025,13 @@ async def process_background_tasks(
         )
 
     if orchestrator_history_data:
+        orchestrator_history_data["sub_thread_data"] = _build_orchestrator_sub_thread_data(parsed_data, thread_info)
         data["save_orchestrator_history"] = orchestrator_history_data
 
     data = make_json_serializable(data)
     await sub_queue_obj.publish_message(data)
 
+    await metrics_queue_obj.publish_message(make_json_serializable({"save_metrics": metrics_entries}))
 
 async def process_background_tasks_for_error(parsed_data, error):
     # Primary-agent sub-tasks inside plan mode skip per-call history.
@@ -940,16 +1055,10 @@ async def process_background_tasks_for_error(parsed_data, error):
             is_external_error=False,
         ),
         _publish_history_to_queue(
-            [parsed_data["usage"]], parsed_data["historyParams"], parsed_data["version_id"]
-        ),
-        save_sub_thread_id_and_name(
-            parsed_data["thread_id"],
-            parsed_data["sub_thread_id"],
-            parsed_data["org_id"],
-            parsed_data["thread_flag"],
-            parsed_data["response_format"],
-            parsed_data["bridge_id"],
-            parsed_data["user"],
+            [parsed_data["usage"]],
+            parsed_data["historyParams"],
+            parsed_data["version_id"],
+            parsed_data=parsed_data,
         ),
     ]
     await asyncio.gather(*[task for task in tasks if task is not None], return_exceptions=True)
@@ -971,8 +1080,7 @@ async def process_batch_background_tasks(parsed_data, result, processed_prompts,
     messages = result.get("messages", [])
     
     tasks = []
-    
-    # Task 1: Save batch conversation logs
+
     if batch_id and messages:
         tasks.append(
             create_batch_conversation_logs(
@@ -980,25 +1088,10 @@ async def process_batch_background_tasks(parsed_data, result, processed_prompts,
                 messages=messages,
                 parsed_data=parsed_data,
                 processed_prompts=processed_prompts,
-                batch_variables=batch_variables
+                batch_variables=batch_variables,
             )
         )
-    
-    # Task 2: Save subthread information (only if thread_id and sub_thread_id exist)
-    if parsed_data.get("thread_id") and parsed_data.get("sub_thread_id"):
-        tasks.append(
-            save_sub_thread_id_and_name(
-                parsed_data["thread_id"],
-                parsed_data["sub_thread_id"],
-                parsed_data["org_id"],
-                parsed_data.get("thread_flag", False),
-                parsed_data.get("response_format", {}),
-                parsed_data["bridge_id"],
-                parsed_data["user"],
-            )
-        )
-    
-    # Execute all tasks in parallel without blocking
+
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1023,6 +1116,7 @@ def build_service_params_for_batch(parsed_data, custom_config, model_output_conf
         "playground": parsed_data["is_playground"],
         "template": parsed_data["template"],
         "response_format": parsed_data["response_format"],
+        "thread_flag": parsed_data.get("thread_flag"),
         "execution_time_logs": [],
         "variables_path": parsed_data["variables_path"],
         "message_id": parsed_data["message_id"],
@@ -1040,6 +1134,7 @@ def build_service_params_for_batch(parsed_data, custom_config, model_output_conf
         "gpt_memory_context": parsed_data.get("gpt_memory_context", ""),
         "files": parsed_data.get("files", []),
         "version_id": parsed_data.get("version_id", ""),
+        "meta": parsed_data.get("meta"),
     }
 
 
@@ -1122,8 +1217,7 @@ def restructure_json_schema(response_type, service):
     
     match service:
         case "openai":
-            schema = response_type.get("json_schema", {})
-            del response_type["json_schema"]
+            schema = response_type.pop("json_schema", {})
             for key, value in schema.items():
                 response_type[key] = value
             return response_type
@@ -1387,12 +1481,15 @@ async def process_background_tasks_for_playground(result, parsed_data):
             new_testcase_id = str(ObjectId())
             result["response"]["testcase_id"] = new_testcase_id
             parsed_data["testcase_data"]["testcase_id"] = new_testcase_id
-            await sendResponse(
-                parsed_data["body"]["bridge_configurations"]["playground_response_format"],
-                parsed_data["testcase_data"],
-                success=True,
-                variables=parsed_data.get("variables", {}),
-            )
+            channel_id = f"{parsed_data.get('org_id')}_{parsed_data.get('bridge_id')}_{parsed_data.get('version_id')}"
+            playground_response_format = {"type": "RTLayer", "cred": {"channel": channel_id, "ttl": 1, "apikey": Config.RTLAYER_AUTH}}
+            if playground_response_format:
+                await sendResponse(
+                    playground_response_format,
+                    parsed_data["testcase_data"],
+                    success=True,
+                    variables=parsed_data.get("variables", {}),
+                )
 
             # Add the generated ID to testcase_data for the background task
 
@@ -1418,16 +1515,31 @@ async def update_cost_and_last_used(parsed_data):
         logger.error(f"Error updating cost and last used: {str(e)}")
 
 
-async def update_cost_usage_and_apikey_status_in_background(original_service, parsed_data, code, completion_success):
+async def update_cost_usage_and_apikey_status_in_background(
+    original_service,
+    parsed_data,
+    code,
+    completion_success,
+    fallback_service=None,
+    fallback_code=None,
+):
     if completion_success:
         asyncio.create_task(update_cost_and_last_used(parsed_data))
-    asyncio.create_task(mark_apikey_status_from_response(original_service, parsed_data, code))
+
+    if fallback_service:
+        asyncio.create_task(mark_apikey_status_from_response(fallback_service, parsed_data, fallback_code))
+
+    if not parsed_data.get("is_request_apikey", False):
+        asyncio.create_task(mark_apikey_status_from_response(original_service, parsed_data, code))
 
 
 async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_info, transfer_request_id, bridge_configurations, request_body=None, chat_function=None):
     import traceback as tb
     original_service = parsed_data["service"]
     original_model = parsed_data["model"]
+    is_nested_stream_call = bool(
+        (request_body.get("body", {}) if isinstance(request_body, dict) else {}).get("_nested_stream_call")
+    )
     timer.start()
     original_error = None
     template_data = None
@@ -1489,12 +1601,26 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                 logger.error(f"SSE fallback attempt also failed ({parsed_data['service']}/{parsed_data['model']}): {retry_err}, {tb.format_exc()}")
                 if class_obj.streamer:
                     await class_obj.streamer.emit_error(original_error, fallback_error=str(retry_err))
-                    await class_obj.streamer.close()
+                    if not is_nested_stream_call:
+                        await class_obj.streamer.close()
+                if not parsed_data.get("is_playground"):
+                    await sendResponse(
+                        parsed_data.get("response_format"), str(retry_err), variables=parsed_data.get("variables", {}), meta=parsed_data.get("meta")
+                    ) if (parsed_data.get("response_format") or {}).get("type") not in (None, "default") else None
+                if is_nested_stream_call:
+                    return {"success": False, "message": str(retry_err), "response": {}}
                 return
         else:
             if class_obj.streamer:
                 await class_obj.streamer.emit_error(original_error)
-                await class_obj.streamer.close()
+                if not is_nested_stream_call:
+                    await class_obj.streamer.close()
+            if not parsed_data.get("is_playground"):
+                await sendResponse(
+                    parsed_data.get("response_format"), original_error, variables=parsed_data.get("variables", {}), meta=parsed_data.get("meta")
+                ) if (parsed_data.get("response_format") or {}).get("type") not in (None, "default") else None
+            if is_nested_stream_call:
+                return {"success": False, "message": str(original_error), "response": {}}
             return
 
     template_data = render_template_if_applicable(parsed_data, result)
@@ -1542,23 +1668,32 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                 transfer_body["bridge_configurations"] = bridge_configurations
                 # Inject the live streamer so agent B writes to the same SSE connection
                 transfer_body["_injected_streamer"] = class_obj.streamer
+                if is_nested_stream_call:
+                    transfer_body["_nested_stream_call"] = True
+                    transfer_body["_sync_injected_stream_call"] = True
 
                 transfer_request_body = {
                     "body": transfer_body,
                     "state": request_body.get("state", {}).copy(),
                     "path_params": request_body.get("path_params", {}),
                 }
-                await chat_function(transfer_request_body)
+                transfer_result = await chat_function(transfer_request_body)
+                if is_nested_stream_call:
+                    return transfer_result
             else:
                 logger.warning(f"SSE transfer: target agent {target_agent_id} not found, closing stream")
                 if class_obj.streamer:
                     await class_obj.streamer.emit_error(f"Transfer target agent {target_agent_id} not found in bridge_configurations")
-                    await class_obj.streamer.close()
+                    if not is_nested_stream_call:
+                        await class_obj.streamer.close()
         except Exception as transfer_err:
             logger.error(f"SSE transfer handling error: {transfer_err}, {tb.format_exc()}")
             if class_obj.streamer:
                 await class_obj.streamer.emit_error(str(transfer_err))
-                await class_obj.streamer.close()
+                if not is_nested_stream_call:
+                    await class_obj.streamer.close()
+            if is_nested_stream_call:
+                return {"success": False, "message": str(transfer_err), "response": {}}
         return  # Agent B owns emit_done + close from here
 
     try:
@@ -1580,10 +1715,44 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                 metadata=template_data,
             )
 
+        # Update usage and run the reviewer loop BEFORE the playground/non-
+        # playground split so both paths see the final, reviewed response with
+        # summed tokens. Reviewer + any re-runs share the same SSE connection
+        # (class_obj.streamer); emit_done is owned by this finalizer below.
+        if not parsed_data["is_playground"] and result.get("response") and result["response"].get("data"):
+            result["response"]["data"]["message_id"] = parsed_data["message_id"]
+        update_usage_metrics(parsed_data, params, latency, result=result, success=True)
+        result.setdefault("response", {}).setdefault("usage", {})
+        result["response"]["usage"]["cost"] = parsed_data["usage"].get("expectedCost", 0)
+
+        if parsed_data.get("_reviewer_bridge_id"):
+            from src.services.commonServices.reviewer_service import run_review_loop
+            result, _reviewer_summary = await run_review_loop(
+                parsed_data=parsed_data,
+                params=params,
+                timer=timer,
+                thread_info=thread_info,
+                bridge_configurations=bridge_configurations,
+                main_result=result,
+                memory=params.get("memory"),
+                streamer=class_obj.streamer,
+            )
+            result.setdefault("response", {}).setdefault("usage", {})
+            result["response"]["usage"]["cost"] = parsed_data["usage"].get("expectedCost", 0)
+
+        model_response = result.get("modelResponse", {}) if isinstance(result, dict) else {}
+        formatted_response = result.get("response", {}) if isinstance(result, dict) else {}
+
+        await handle_post_tool(parsed_data, result)
+
         if not parsed_data["is_playground"]:
-            if result.get("response") and result["response"].get("data"):
-                result["response"]["data"]["message_id"] = parsed_data["message_id"]
-            update_usage_metrics(parsed_data, params, latency, result=result, success=True)
+            await sendResponse(
+                parsed_data.get("response_format"),
+                result["response"],
+                success=True,
+                variables=parsed_data.get("variables", {}),
+                meta=parsed_data.get("meta"),
+            )
             await process_background_tasks(
                 parsed_data, result, params, thread_info, transfer_request_id, bridge_configurations
             )
@@ -1591,8 +1760,6 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
             await process_background_tasks_for_playground(result, parsed_data)
 
         if class_obj.streamer:
-            model_response = result.get("modelResponse", {}) if isinstance(result, dict) else {}
-            formatted_response = result.get("response", {}) if isinstance(result, dict) else {}
             if getattr(class_obj, 'tool_call_limit_error', None):
                 result["error"] = class_obj.tool_call_limit_error
             if result.get("error"):
@@ -1603,16 +1770,21 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                 or model_response.get("status")
                 or ""
             )
-            accumulated_payload = None if template_data else formatted_response
-            await class_obj.streamer.emit_done(
-                usage=formatted_response.get("usage", {}),
-                message_id=str(parsed_data.get("message_id") or ""),
-                finish_reason=finish_reason,
-                accumulated_data=accumulated_payload,
-            )
-            await class_obj.streamer.close()
+            if not is_nested_stream_call:
+                accumulated_payload = None if template_data else formatted_response
+                await class_obj.streamer.emit_done(
+                    usage=formatted_response.get("usage", {}),
+                    message_id=str(parsed_data.get("message_id") or ""),
+                    finish_reason=finish_reason,
+                    accumulated_data=accumulated_payload,
+                )
+                await class_obj.streamer.close()
+            
+        return {"success": True, "response": result.get("response", {})}
     except Exception as err:
         logger.error(f"SSE finalization error: {str(err)}, {tb.format_exc()}")
         if class_obj.streamer:
             await class_obj.streamer.emit_error(str(err))
-            await class_obj.streamer.close()
+            if not is_nested_stream_call:
+                await class_obj.streamer.close()
+        return {"success": False, "message": str(err), "response": {}}

@@ -112,6 +112,7 @@ async def _prepare_configuration_response(
 
     
     apikey_src = apikeys_dict or folder_apikeys_dict or {}
+    is_request_apikey = bool(apikey)
     apikey = setup_api_key(service, result, apikey, chatbot)
     apikey_object_id = result.get("bridges", {}).get("apikey_object_id")
     
@@ -144,6 +145,7 @@ async def _prepare_configuration_response(
             "configuration": configuration,
             "service": service,
             "apikey": apikey,
+            "is_request_apikey": is_request_apikey,
             "apikey_object_id": apikey_object_id,
             "RTLayer": False,
             "settings": result.get("bridges", {}).get("settings", {}),
@@ -182,6 +184,16 @@ async def _prepare_configuration_response(
                 "config": tool_config,
                 "args": tool_args,
             })
+    raw_post_tool = result.get("bridges", {}).get("folder_post_tool") or {}
+    raw_post_tool_script_id = raw_post_tool.get('script_id', {}) if raw_post_tool else {}
+    post_tool_data = None
+    if raw_post_tool:
+        variables_path_post_tool = bridge.get("variables_path", {}).get(raw_post_tool_script_id, {})
+        post_tool_data = {
+            **raw_post_tool,
+            "args": variables_path_post_tool,
+            "config": raw_post_tool.get("config", {}),
+        }
 
     rag_data = bridge.get("doc_ids")
     gpt_memory_context = bridge.get("gpt_memory_context")
@@ -213,10 +225,12 @@ async def _prepare_configuration_response(
     base_config = {
         "configuration": configuration,
         "pre_tools_data": pre_tools_data_for_later,
+        "post_tool_data": post_tool_data,
         "service": service,
         "apikey": apikey,
         "auto_model_select": auto_model_select,
         "service_apikeys": service_apikeys,
+        "is_request_apikey": is_request_apikey,
         "apikey_object_id": apikey_object_id,
         "apikey_status": apikey_status,
         "RTLayer": RTLayer,
@@ -244,6 +258,10 @@ async def _prepare_configuration_response(
         "chatbot_auto_answers": chatbot_auto_answers,
         "cache_on": cache_on,
         "richui_templates": result.get("bridges", {}).get("richui_templates"),
+        "meta": bridge_data.get("meta") or bridge_data.get("bridges", {}).get("meta"),
+        "reviewer_agent": str(
+            result.get("bridges", {}).get("settings", {}).get("reviewer_agent") or ""
+        ),
         "api_collection":apikey_src,
         "limit": {
             "bridge": {
@@ -344,6 +362,31 @@ async def _collect_connected_agent_configs(result, org_id, visited):
 
         nested = await _collect_connected_agent_configs(child_result, org_id, visited)
         aggregated_configs.update(nested)
+
+    reviewer_bridge_id_raw = bridge_payload.get("settings", {}).get("reviewer_agent")
+    reviewer_bridge_id = str(reviewer_bridge_id_raw) if reviewer_bridge_id_raw else ""
+    if reviewer_bridge_id and reviewer_bridge_id not in visited:
+        try:
+            error, reviewer_config, reviewer_result, resolved_reviewer_id = await _prepare_configuration_response(
+                None, None, reviewer_bridge_id, None,
+                None, None, org_id, None, None,
+                None, None, None, None,
+            )
+        except Exception as exc:
+            logger.error(f"Error fetching configuration for reviewer agent {reviewer_bridge_id}: {exc}")
+        else:
+            if error:
+                logger.error(f"Skipping reviewer agent {reviewer_bridge_id} due to error response: {error}")
+            else:
+                resolved_id = resolved_reviewer_id or reviewer_bridge_id
+                if resolved_id:
+                    reviewer_config["bridge_id"] = resolved_id
+                    visited.add(resolved_id)
+                visited.add(reviewer_bridge_id)
+                aggregated_configs[reviewer_bridge_id] = reviewer_config
+
+                nested = await _collect_connected_agent_configs(reviewer_result, org_id, visited)
+                aggregated_configs.update(nested)
 
     return aggregated_configs
 

@@ -309,7 +309,7 @@ async def send_message(cred, data):
         logger.error(f"Unexpected send message error=>, {str(e)}")
 
 
-async def sendResponse(response_format, data, success=False, variables=None):
+async def sendResponse(response_format, data, success=False, variables=None, meta=None):
     if variables is None:
         variables = {}
     data_to_send = {"response" if success else "error": data, "success": success}
@@ -318,6 +318,8 @@ async def sendResponse(response_format, data, success=False, variables=None):
             return await send_message(cred=response_format["cred"], data=data_to_send)
         case "webhook":
             data_to_send["variables"] = variables
+            if meta:
+                data_to_send["meta"] = meta
             return await send_request(**response_format["cred"], method="POST", data=data_to_send)
 
 
@@ -360,6 +362,10 @@ async def process_data_and_run_tools(codes_mapping, self):
                         "variables": {key: value for key, value in tool_data.get("args").items() if key != "user"},
                         "message_id": self.message_id,
                     }
+
+                    if self.stream_mode and self.streamer:
+                        agent_args["injected_streamer"] = self.streamer
+                        agent_args["nested_stream_call"] = True
 
                     # Add thread_id and sub_thread_id if bridge requires it
                     if self.tool_id_and_name_mapping[name].get("requires_thread_id", False):
@@ -551,15 +557,6 @@ async def make_request_data_and_publish_sub_queue(parsed_data, result, params, t
     assistant_message = result.get("historyParams", {}).get("message", "")
 
     data = {
-        "save_sub_thread_id_and_name": {
-            "org_id": parsed_data.get("org_id"),
-            "thread_id": thread_info.get("thread_id") if thread_info else parsed_data.get("thread_id"),
-            "sub_thread_id": thread_info.get("sub_thread_id") if thread_info else parsed_data.get("sub_thread_id"),
-            "thread_flag": parsed_data.get("thread_flag"),
-            "response_format": parsed_data.get("response_format"),
-            "bridge_id": parsed_data.get("bridge_id"),
-            "user": parsed_data.get("user"),
-        },
         "metrics_service": {
             "dataset": [parsed_data.get("usage", {})],
             "history_params": result.get("historyParams", {}),
@@ -604,7 +601,7 @@ async def make_request_data_and_publish_sub_queue(parsed_data, result, params, t
             "bridge_id": parsed_data.get("bridge_id"),
             "bridge_name": parsed_data.get("name", ""),
             "system_prompt": parsed_data.get("configuration", {}).get("prompt", ""),
-            "chatbot_auto_answers": parsed_data.get("chatbot_auto_answers", False),
+            "cache_on": parsed_data.get("cache_on", False),
             "is_cache_hit": parsed_data.get("is_cache_hit", False),
             "resource_id": parsed_data.get("cache_hit_resource_id", None)
         },

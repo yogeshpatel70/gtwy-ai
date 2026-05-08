@@ -61,6 +61,7 @@ class BaseService:
         self.playground = params.get("playground")
         self.template = params.get("template")
         self.response_format = params.get("response_format")
+        self.thread_flag = params.get("thread_flag")
         self.execution_time_logs = params.get("execution_time_logs", {})
         self.timer = params.get("timer")
         self.func_tool_call_data = []
@@ -96,6 +97,7 @@ class BaseService:
         self.is_embed = params.get("is_embed")
         self.user_id = params.get("user_id")
         self.api_collection = params.get("api_collection")
+        self.meta = params.get("meta")
         self.tool_call_limit_error = None
         self.stream_mode = params.get("customConfig", {}).get("stream") is True
         if self.stream_mode:
@@ -114,7 +116,7 @@ class BaseService:
 
     async def run_tool(self, responses, service):
         codes_mapping, function_list = make_code_mapping_by_service(responses, service)
-        if not self.playground:
+        if not self.playground and self.response_format["type"] != "webhook":
             asyncio.create_task(
                 sendResponse(self.response_format, data={"function_call": True, "Name": function_list}, success=True)
             )
@@ -253,7 +255,7 @@ class BaseService:
         configuration, tools = self.update_configration(
             model_response, func_response_data, configuration, mapping_response_data, service, tools
         )
-        if not self.playground and not self.stream_mode:
+        if not self.playground and not self.stream_mode and self.response_format["type"] != "webhook":
             asyncio.create_task(
                 sendResponse(
                     self.response_format,
@@ -297,9 +299,12 @@ class BaseService:
             "message_id": self.message_id,
         }
         payload = metrics_service.build_history_and_metrics_payload([usage], history_params, None)
+        history_data = payload["conversation_log_data"]
+        history_data["thread_flag"] = self.thread_flag
+        history_data["response_format"] = self.response_format
         await asyncio.gather(
-            sub_queue_obj.publish_message(make_json_serializable({"save_history": [payload]})),
-            sendResponse(self.response_format, data=response.get("error")),
+            sub_queue_obj.publish_message(make_json_serializable({"save_history": [history_data]})),
+            sendResponse(self.response_format, data=response.get("error"), meta=self.meta),
             return_exceptions=True,
         )
 

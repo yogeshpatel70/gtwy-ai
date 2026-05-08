@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from globals import logger
 from src.services.commonServices.streaming_service import StreamingService
 from src.services.todo import executor_service, plan_store
+from src.services.todo.plan_store import _get_tasks, _set_tasks
 from src.db_services.metrics_service import publish_plan_history_update
 
 
@@ -24,7 +25,7 @@ def _format_plan_response(plan, message_id, model="", finish_reason="completed",
     
     # If plan is completed and extract_final_result is True, get the last task's result
     if extract_final_result and plan.get("state") == "completed":
-        tasks = plan.get("tasks", {})
+        tasks = _get_tasks(plan)
         if tasks:
             # Find the last completed task (highest task number)
             completed_tasks = {
@@ -79,6 +80,18 @@ def _format_plan_response(plan, message_id, model="", finish_reason="completed",
     }
 
 
+def _derive_done_finish_reason(plan):
+    """Map plan state to done finish_reason for accurate client semantics."""
+    state = (plan or {}).get("state")
+    if state == "completed":
+        return "stop"
+    if state == "paused":
+        return "paused"
+    if state == "failed":
+        return "error"
+    return "stop"
+
+
 async def _stream_plan_action(streamer, action, parsed_data, bridge_configurations, existing_plan):
     """Background task: execute the plan action and emit SSE events."""
     org_id = parsed_data["org_id"]
@@ -102,11 +115,13 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
 
         if action == "approve":
             # Reset previously failed tasks so they retry
-            for task in existing_plan.get("tasks", {}).values():
+            tasks = _get_tasks(existing_plan)
+            for task in tasks.values():
                 if task["status"] == "failed":
                     task["status"] = "pending"
                     task["retry"] = 0
                     task["error"] = None
+            _set_tasks(existing_plan, tasks)
             existing_plan["state"] = "approved"
             await plan_store.update_plan(existing_plan)
             await streamer.emit_delta(json.dumps({"event": "execution_started", "state": "executing"}))
@@ -116,11 +131,18 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
                 org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, parsed_data, streamer=streamer
             )
             final_plan = await plan_store.get_plan(org_id, bridge_id, thread_id, sub_thread_id)
-            formatted = _format_plan_response(final_plan, message_id, model, extract_final_result=True)
+            final_finish_reason = _derive_done_finish_reason(final_plan)
+            formatted = _format_plan_response(
+                final_plan,
+                message_id,
+                model,
+                finish_reason=final_finish_reason,
+                extract_final_result=True,
+            )
             await streamer.emit_done(
                 usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 message_id=message_id,
-                finish_reason="stop",
+                finish_reason=final_finish_reason,
                 accumulated_data=formatted,
             )
             # Update the history entry that was created during planning, enriched
@@ -132,18 +154,24 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
                     main_agent_metrics=main_agent_metrics,
                     history_params_extra={
                         "message": formatted["data"]["content"],
-                        "finish_reason": "stop",
+                        "finish_reason": final_finish_reason,
                         "status": (final_plan or {}).get("state") == "completed",
                     },
                 )
             )
 
         elif action == "status":
+            status_finish_reason = _derive_done_finish_reason(existing_plan)
             await streamer.emit_done(
                 usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 message_id=message_id,
-                finish_reason="stop",
-                accumulated_data=_format_plan_response(existing_plan, message_id, model),
+                finish_reason=status_finish_reason,
+                accumulated_data=_format_plan_response(
+                    existing_plan,
+                    message_id,
+                    model,
+                    finish_reason=status_finish_reason,
+                ),
             )
 
         elif action == "respond":
@@ -168,12 +196,13 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
             await streamer.emit_delta(json.dumps({"event": "execution_started", "state": "executing"}))
 
             # Replay settled tasks so the client can restore its state
+            plan_tasks = _get_tasks(plan)
             sorted_task_ids = sorted(
-                plan.get("tasks", {}).keys(),
+                plan_tasks.keys(),
                 key=lambda x: int(x.split("_")[1]) if "_" in x and x.split("_")[1].isdigit() else 0,
             )
             for t_id in sorted_task_ids:
-                t = plan["tasks"][t_id]
+                t = plan_tasks[t_id]
                 status = t.get("status")
                 if status == "completed":
                     await streamer.emit_delta(json.dumps({"event": "task_started", "task_id": t_id, "title": t.get("title", ""), "replayed": True}))
@@ -189,11 +218,18 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
                 org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, parsed_data, streamer=streamer
             )
             final_plan = await plan_store.get_plan(org_id, bridge_id, thread_id, sub_thread_id)
-            formatted = _format_plan_response(final_plan, message_id, model, extract_final_result=True)
+            final_finish_reason = _derive_done_finish_reason(final_plan)
+            formatted = _format_plan_response(
+                final_plan,
+                message_id,
+                model,
+                finish_reason=final_finish_reason,
+                extract_final_result=True,
+            )
             await streamer.emit_done(
                 usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 message_id=message_id,
-                finish_reason="stop",
+                finish_reason=final_finish_reason,
                 accumulated_data=formatted,
             )
             asyncio.create_task(
@@ -203,7 +239,7 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
                     main_agent_metrics=main_agent_metrics,
                     history_params_extra={
                         "message": formatted["data"]["content"],
-                        "finish_reason": "stop",
+                        "finish_reason": final_finish_reason,
                         "status": (final_plan or {}).get("state") == "completed",
                     },
                 )
@@ -216,17 +252,18 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
                 return
             
             # Reset the specific task to pending so it will be re-executed
-            task = existing_plan.get("tasks", {}).get(task_id)
+            tasks = _get_tasks(existing_plan)
+            task = tasks.get(task_id)
             if not task:
                 await streamer.emit_error(f"Task {task_id} not found")
                 return
-            
-            # Reset task state
+
             task["status"] = "pending"
             task["retry"] = 0
             task["result"] = None
             task["error"] = None
             task["is_error"] = False
+            _set_tasks(existing_plan, tasks)
             existing_plan["state"] = "approved"
             await plan_store.update_plan(existing_plan)
             
@@ -237,11 +274,18 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
                 org_id, bridge_id, thread_id, sub_thread_id, bridge_configurations, parsed_data, streamer=streamer
             )
             final_plan = await plan_store.get_plan(org_id, bridge_id, thread_id, sub_thread_id)
-            formatted = _format_plan_response(final_plan, message_id, model, extract_final_result=True)
+            final_finish_reason = _derive_done_finish_reason(final_plan)
+            formatted = _format_plan_response(
+                final_plan,
+                message_id,
+                model,
+                finish_reason=final_finish_reason,
+                extract_final_result=True,
+            )
             await streamer.emit_done(
                 usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 message_id=message_id,
-                finish_reason="stop",
+                finish_reason=final_finish_reason,
                 accumulated_data=formatted,
             )
             asyncio.create_task(
@@ -251,7 +295,7 @@ async def _stream_plan_action(streamer, action, parsed_data, bridge_configuratio
                     main_agent_metrics=main_agent_metrics,
                     history_params_extra={
                         "message": formatted["data"]["content"],
-                        "finish_reason": "stop",
+                        "finish_reason": final_finish_reason,
                         "status": (final_plan or {}).get("state") == "completed",
                     },
                 )

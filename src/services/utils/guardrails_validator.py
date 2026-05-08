@@ -228,18 +228,25 @@ Active categories being checked: {', '.join(category_names)}"""
 
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse guardrails response as JSON: {e}")
-        # Default to safe if we can't parse the response
-        return {"is_safe": True, "reason": "Failed to parse guardrails response", "confidence": 0.5, "violations": []}
+        return {
+            "is_safe": None,
+            "reason": "Failed to parse guardrails response",
+            "confidence": 0.0,
+            "violations": [],
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
 
     except Exception as e:
         logger.error(f"Error in guardrails validation: {e}")
         traceback.print_exc()
-        # Default to safe if there's an error (graceful degradation)
         return {
-            "is_safe": True,
-            "reason": "Guardrails validation error - defaulting to safe",
-            "confidence": 0.5,
+            "is_safe": None,
+            "reason": f"Guardrails validation failed: {e}",
+            "confidence": 0.0,
             "violations": [],
+            "error": str(e),
+            "error_type": type(e).__name__,
         }
 
 
@@ -291,6 +298,28 @@ async def guardrails_check(parsed_data: dict) -> dict:
             user_message=user_message, api_key=api_key, guardrails_config=guardrails_config, custom_prompt=custom_prompt
         )
 
+        # Validation itself errored (e.g. OpenAI 429, network, JSON parse). Surface as a real error
+        # rather than letting the request continue as if guardrails had passed.
+        if validation_result.get("is_safe") is None:
+            error_message = validation_result.get("error", "Unknown guardrails error")
+            error_type = validation_result.get("error_type", "GuardrailsError")
+            logger.error(f"Guardrails validation failed ({error_type}): {error_message}")
+            return {
+                "success": False,
+                "status_code": 502,
+                "response": {
+                    "data": {
+                        "message": {
+                            "content": "Guardrails validation service is currently unavailable. Please try again.",
+                            "role": "assistant",
+                        }
+                    }
+                },
+                "guardrails_error": True,
+                "error": error_message,
+                "error_type": error_type,
+            }
+
         # Check if content is safe
         if not validation_result.get("is_safe", True):
             reason = validation_result.get("reason", "Content blocked by guardrails")
@@ -325,5 +354,18 @@ async def guardrails_check(parsed_data: dict) -> dict:
     except Exception as e:
         logger.error(f"Error in guardrails_check: {e}")
         traceback.print_exc()
-        # Don't block the request if there's an error in guardrails (graceful degradation)
-        return None
+        return {
+            "success": False,
+            "status_code": 502,
+            "response": {
+                "data": {
+                    "message": {
+                        "content": "Guardrails validation service is currently unavailable. Please try again.",
+                        "role": "assistant",
+                    }
+                }
+            },
+            "guardrails_error": True,
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }

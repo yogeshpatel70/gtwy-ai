@@ -6,6 +6,7 @@ from src.configs.constant import redis_keys
 from ..cache_service import acquire_lock, delete_in_cache, find_in_cache_with_prefix, make_json_serializable, release_lock
 from ..commonServices.baseService.baseService import sendResponse
 from ..commonServices.queueService.queueLogService import sub_queue_obj
+from ..commonServices.queueService.queueMetricsService import metrics_queue_obj
 from src.utils.alert_template import create_response_format
 from .ai_middleware_format import process_batch_results
 from .batch_script_utils import get_batch_result_handler, is_finalized_batch_item
@@ -39,7 +40,8 @@ async def check_batch_status():
             bridge_id = batch_data.get('bridge_id')
             version_id = batch_data.get('version_id')
             thread_id = batch_data.get('thread_id')
-            
+            meta = batch_data.get('meta')
+
             cache_key = f"{redis_keys['batch_']}{batch_id}"
 
             # Try to acquire lock for this batch
@@ -102,7 +104,7 @@ async def check_batch_status():
                             webhook_error = None
                             if webhook.get('url') is not None:
                                 try:
-                                    webhook_response = await sendResponse(response_format, data=formatted_results, success=has_success)
+                                    webhook_response = await sendResponse(response_format, data=formatted_results, success=has_success, meta=meta)
                                     logger.info(f"Batch {batch_id} - webhook sent")
                                 except Exception as webhook_err:
                                     webhook_error = str(webhook_err)
@@ -204,18 +206,20 @@ async def check_batch_status():
                                         'service': service
                                     })
 
-                            # Publish batch updates and metrics to queue for Node.js to save
-                            if batch_updates or metrics_data:
-                                queue_message = {}
-                                if batch_updates:
-                                    queue_message['update_batch_history'] = batch_updates
-                                if metrics_data:
-                                    queue_message['save_batch_metrics'] = metrics_data
+                            # Publish batch updates to log queue, metrics to metrics queue
+                            if batch_updates:
                                 try:
-                                    await sub_queue_obj.publish_message(make_json_serializable(queue_message))
-                                    logger.info(f"Published {len(batch_updates)} updates and {len(metrics_data)} metrics for batch {batch_id} to queue")
+                                    await sub_queue_obj.publish_message(make_json_serializable({"update_batch_history": batch_updates}))
+                                    logger.info(f"Published {len(batch_updates)} updates for batch {batch_id} to queue")
                                 except Exception as queue_error:
-                                    logger.error(f"Error publishing batch results to queue for batch {batch_id}: {str(queue_error)}")
+                                    logger.error(f"Error publishing batch updates to queue for batch {batch_id}: {str(queue_error)}")
+
+                            if metrics_data:
+                                try:
+                                    await metrics_queue_obj.publish_message(make_json_serializable({"save_batch_metrics": metrics_data}))
+                                    logger.info(f"Published {len(metrics_data)} metrics for batch {batch_id} to metrics queue")
+                                except Exception as queue_error:
+                                    logger.error(f"Error publishing batch metrics to metrics queue for batch {batch_id}: {str(queue_error)}")
                             
                             await delete_in_cache(cache_key)
                             logger.info(f"Batch {batch_id} completed and removed from cache")
@@ -235,7 +239,7 @@ async def check_batch_status():
                             
                             if webhook.get('url') is not None:
                                 try:
-                                    await sendResponse(response_format, data=error_response, success=False)
+                                    await sendResponse(response_format, data=error_response, success=False, meta=meta)
                                     logger.info(f"Batch {batch_id} no-results webhook sent")
                                 except Exception as webhook_err:
                                     logger.error(f"Error sending webhook for batch {batch_id} (no results case): {str(webhook_err)}")
