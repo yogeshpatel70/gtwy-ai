@@ -18,7 +18,7 @@ from .token_calculation import TokenCalculator
 async def repeat_function():
     while True:
         await check_batch_status()
-        await asyncio.sleep(15)
+        await asyncio.sleep(900)
 
 
 async def check_batch_status():
