@@ -16,6 +16,7 @@ from src.db_services.metrics_service import (
     save_conversations_to_redis,
 )
 from src.services.cache_service import find_in_cache, store_in_cache, make_json_serializable
+from src.services.utils.gpt_memory import get_gpt_memory, parse_memory
 from src.configs.constant import bridge_ids, redis_keys, alert_types
 from src.services.commonServices.baseService.utils import axios_work, make_request_data_and_publish_sub_queue, remove_additional_properties_with_anyof
 from src.services.commonServices.queueService.queueLogService import sub_queue_obj
@@ -681,18 +682,14 @@ async def prepare_prompt(parsed_data, thread_info, model_config, custom_config):
         id = f"{thread_info['thread_id']}_{thread_info['sub_thread_id']}_{parsed_data.get('version_id') or parsed_data.get('bridge_id')}"
         parsed_data["id"] = id
         if gpt_memory:
-            memory = await find_in_cache(id)
-            if memory:
-                # Convert bytes to string if needed
-                if isinstance(memory, bytes):
-                    memory = memory.decode("utf-8")
-                parsed_data["memory"] = memory
-            else:
-                response, _ = await fetch(
-                    "https://flow.sokt.io/func/scriCJLHynCG", "POST", None, None, {"threadID": id}
-                )
-                parsed_data["memory"] = response
-                memory = response
+            _memory_id, raw_memory = await get_gpt_memory(
+                bridge_id=parsed_data.get("bridge_id"),
+                thread_id=thread_info["thread_id"],
+                sub_thread_id=thread_info["sub_thread_id"],
+                version_id=parsed_data.get("version_id"),
+            )
+            memory = parse_memory(raw_memory)
+            parsed_data["memory"] = memory
         configuration["prompt"], missing_vars = Helper.replace_variables_in_prompt(
             configuration.get("prompt") or "", variables
         )

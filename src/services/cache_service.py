@@ -33,6 +33,18 @@ async def find_in_cache(identifier: str) -> str | None:
         return None
 
 
+async def incr_in_cache(identifier: str, ttl: int = DEFAULT_REDIS_TTL) -> int:
+    try:
+        key = f"{REDIS_PREFIX}{identifier}"
+        value = await client.incr(key)
+        if value == 1:
+            await client.expire(key, int(ttl))
+        return value
+    except Exception as e:
+        logger.error(f"Error incrementing in cache: {str(e)}")
+        return 0
+
+
 async def delete_in_cache(identifiers: str | list[str]) -> bool:
     if not await client.ping():
         return False
