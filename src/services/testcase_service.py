@@ -47,25 +47,14 @@ def validate_testcase_request_data(body: dict[str, Any]) -> dict[str, Any]:
     Raises:
         TestcaseValidationError: If required fields are missing or invalid
     """
-    # Support both version_id (single) and version_ids (array)
-    version_id = body.get("version_id")
     version_ids = body.get("version_ids")
-    
-    if not version_id and not version_ids:
-        raise TestcaseValidationError("version_id or version_ids is required")
-    
-    # Normalize to version_ids array
-    if version_id and not version_ids:
-        version_ids = [version_id]
-    elif version_ids and not version_id:
-        # Use first version_id as primary for backward compatibility
-        version_id = version_ids[0] if version_ids else None
+    if not version_ids:
+        raise TestcaseValidationError("version_ids is required")
+    if not isinstance(version_ids, list):
+        version_ids = [version_ids]
 
     bridge_id = body.get("bridge_id")
-    # Support both testcase_id (singular) and testcase_ids (plural array)
-    testcase_ids = body.get("testcase_ids")
-    if testcase_id and not testcase_ids:
-        testcase_ids = [testcase_id] if not isinstance(testcase_id, list) else testcase_id
+    testcase_id = body.get("testcase_id")
     testcases_flag = body.get("testcases", False)
     testcase_data = body.get("testcase_data")
     variables = body.get("variables", {})
@@ -73,13 +62,12 @@ def validate_testcase_request_data(body: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "bridge_id": bridge_id,
-        "version_id": version_id,
         "version_ids": version_ids,
-        "testcase_ids": testcase_ids,
+        "testcase_id": testcase_id,
         "testcases_flag": testcases_flag,
         "testcase_data": testcase_data,
         "variables": variables,
-        "matching_type": matching_type
+        "matching_type": matching_type,
     }
 
 
@@ -101,7 +89,7 @@ def validate_direct_testcase_data(testcase_data: dict[str, Any]) -> None:
 
 
 async def fetch_testcases_from_request(
-    testcases_flag: bool, testcase_data: dict[str, Any] | None, bridge_id: str | None, testcase_ids: list[str] | None = None
+    testcases_flag: bool, testcase_data: dict[str, Any] | None, bridge_id: str | None, testcase_id: str | None = None
 ) -> list[dict[str, Any]]:
     """
     Fetch testcases either from direct input or MongoDB
@@ -110,7 +98,7 @@ async def fetch_testcases_from_request(
         testcases_flag: Flag indicating if testcase data is provided directly
         testcase_data: Direct testcase data (if provided)
         bridge_id: Bridge ID for MongoDB query
-        testcase_id: Specific testcase ID for MongoDB query
+        testcase_id: Specific testcase ID for MongoDB query (single)
 
     Returns:
         List of testcase dictionaries
@@ -135,26 +123,23 @@ async def fetch_testcases_from_request(
 
         return [testcase]
 
-    else:
-        # Fetch from MongoDB
-        if not bridge_id:
-            raise TestcaseValidationError("bridge_id is required")
+    # Fetch from MongoDB
+    if not bridge_id:
+        raise TestcaseValidationError("bridge_id is required")
 
-        testcases_collection = db["testcases"]
+    testcases_collection = db["testcases"]
 
-        if testcase_ids:
-            # Fetch multiple testcases by list of IDs
-            object_ids = [ObjectId(tid) for tid in testcase_ids]
-            testcases = await testcases_collection.find({"_id": {"$in": object_ids}}).to_list(length=None)
-            if not testcases:
-                raise TestcaseNotFoundError("No testcases found for the given testcase_ids")
-            return testcases
-        else:
-            # Fetch all testcases for bridge_id
-            testcases = await testcases_collection.find({"bridge_id": bridge_id}).to_list(length=None)
-            if not testcases:
-                raise TestcaseNotFoundError("No testcases found for the given bridge_id")
-            return testcases
+    if testcase_id:
+        testcase = await testcases_collection.find_one({"_id": ObjectId(testcase_id)})
+        if not testcase:
+            raise TestcaseNotFoundError("No testcase found for the given testcase_id")
+        return [testcase]
+
+    # No testcase_id -> fetch all testcases for bridge_id
+    testcases = await testcases_collection.find({"bridge_id": bridge_id}).to_list(length=None)
+    if not testcases:
+        raise TestcaseNotFoundError("No testcases found for the given bridge_id")
+    return testcases
 
 
 async def get_testcase_configuration(
@@ -375,8 +360,8 @@ async def execute_testcases(body: dict[str, Any], org_id: str) -> dict[str, Any]
         TestcaseValidationError: If validation fails
         TestcaseNotFoundError: If testcases are not found
     """
-    import asyncio
-    
+    from src.db_services.testcase_services import get_version_updated_at
+
     # Validate request data
     request_data = validate_testcase_request_data(body)
 
@@ -385,83 +370,45 @@ async def execute_testcases(body: dict[str, Any], org_id: str) -> dict[str, Any]
         request_data["testcases_flag"],
         request_data["testcase_data"],
         request_data["bridge_id"],
-        request_data["testcase_ids"],
+        request_data["testcase_id"],
     )
 
-    # If multiple versions, run testcases for each version in parallel
-    version_ids = request_data.get("version_ids", [request_data["version_id"]])
-    
-    from src.db_services.testcase_services import get_version_updated_at
+    version_ids = request_data["version_ids"]
 
-    if len(version_ids) > 1:
-        # Run testcases for all versions in parallel
-        async def run_for_version(version_id):
-            db_config, version_updated_at = await asyncio.gather(
-                get_testcase_configuration(
-                    org_id,
-                    version_id,
-                    request_data["bridge_id"],
-                    request_data["testcases_flag"],
-                    request_data["testcase_data"],
-                    request_data["variables"],
-                ),
-                get_version_updated_at(version_id),
-            )
-            results = await run_testcases_parallel(
-                testcases,
-                db_config,
-                request_data['matching_type'],
-                version_updated_at=version_updated_at,
-            )
-            return {
-                "version_id": version_id,
-                "total_testcases": len(testcases),
-                "results": results
-            }
-        
-        # Execute all versions concurrently
-        version_results = await asyncio.gather(*[run_for_version(vid) for vid in version_ids])
-        
-        return {
-            "success": True,
-            "bridge_id": request_data["bridge_id"],
-            "version_ids": version_ids,
-            "total_versions": len(version_ids),
-            "version_results": version_results,
-            "testcase_source": "direct"
-            if (request_data["testcases_flag"] and request_data["testcase_data"])
-            else "mongodb",
-        }
-    else:
-        # Single version - use original logic
+    async def run_for_version(version_id):
         db_config, version_updated_at = await asyncio.gather(
             get_testcase_configuration(
                 org_id,
-                request_data["version_id"],
+                version_id,
                 request_data["bridge_id"],
                 request_data["testcases_flag"],
                 request_data["testcase_data"],
                 request_data["variables"],
             ),
-            get_version_updated_at(request_data["version_id"]),
+            get_version_updated_at(version_id),
         )
-
-        # Run testcases in parallel
         results = await run_testcases_parallel(
             testcases,
             db_config,
-            request_data['matching_type'],
+            request_data["matching_type"],
             version_updated_at=version_updated_at,
         )
-
-        # Return formatted response
         return {
-            "success": True,
-            "bridge_id": request_data["bridge_id"],
-            "version_id": request_data["version_id"],
+            "version_id": version_id,
             "total_testcases": len(testcases),
             "results": results,
-            "testcase_source": "direct"
-            if (request_data["testcases_flag"] and request_data["testcase_data"])
-            else "mongodb",
         }
+
+    # Run all versions concurrently (works for 1 or N)
+    version_results = await asyncio.gather(*[run_for_version(vid) for vid in version_ids])
+
+    return {
+        "success": True,
+        "bridge_id": request_data["bridge_id"],
+        "version_ids": version_ids,
+        "total_versions": len(version_ids),
+        "version_results": version_results,
+        "testcase_source": "direct"
+        if (request_data["testcases_flag"] and request_data["testcase_data"])
+        else "mongodb",
+    }
