@@ -64,7 +64,6 @@ def validate_testcase_request_data(body: dict[str, Any]) -> dict[str, Any]:
     bridge_id = body.get("bridge_id")
     # Support both testcase_id (singular) and testcase_ids (plural array)
     testcase_ids = body.get("testcase_ids")
-    testcase_id = body.get("testcase_id")
     if testcase_id and not testcase_ids:
         testcase_ids = [testcase_id] if not isinstance(testcase_id, list) else testcase_id
     testcases_flag = body.get("testcases", False)
@@ -102,7 +101,7 @@ def validate_direct_testcase_data(testcase_data: dict[str, Any]) -> None:
 
 
 async def fetch_testcases_from_request(
-    testcases_flag: bool, testcase_data: dict[str, Any] | None, bridge_id: str | None, testcase_id: str | None
+    testcases_flag: bool, testcase_data: dict[str, Any] | None, bridge_id: str | None, testcase_ids: list[str] | None = None
 ) -> list[dict[str, Any]]:
     """
     Fetch testcases either from direct input or MongoDB
@@ -143,12 +142,13 @@ async def fetch_testcases_from_request(
 
         testcases_collection = db["testcases"]
 
-        if testcase_id:
-            # Fetch specific testcase by ID
-            testcase = await testcases_collection.find_one({"_id": ObjectId(testcase_id)})
-            if not testcase:
-                raise TestcaseNotFoundError("No testcase found for the given testcase_id")
-            return [testcase]
+        if testcase_ids:
+            # Fetch multiple testcases by list of IDs
+            object_ids = [ObjectId(tid) for tid in testcase_ids]
+            testcases = await testcases_collection.find({"_id": {"$in": object_ids}}).to_list(length=None)
+            if not testcases:
+                raise TestcaseNotFoundError("No testcases found for the given testcase_ids")
+            return testcases
         else:
             # Fetch all testcases for bridge_id
             testcases = await testcases_collection.find({"bridge_id": bridge_id}).to_list(length=None)
@@ -218,6 +218,10 @@ async def process_single_testcase(testcase: dict[str, Any], db_config: dict[str,
         # Deep copy the configuration to avoid race conditions in parallel execution
         if "configuration" in db_config:
             db_config["configuration"] = db_config["configuration"].copy()
+
+        # Merge testcase-stored variables (higher priority) with config/request variables
+        merged_variables = {**db_config.get("variables", {}), **testcase.get("variables", {})}
+        db_config["variables"] = merged_variables
 
         # Set conversation in db_config
         db_config["configuration"]["conversation"] = testcase.get("conversation", [])
