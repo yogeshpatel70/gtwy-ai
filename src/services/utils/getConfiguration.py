@@ -304,8 +304,6 @@ async def _collect_connected_agent_configs(agent_data, org_id, visited):
         pending.append((bridge_id_value, merged_info))
 
     aggregated_configs = {}
-        merged_info = transform_agent_config_to_frontend(merged_info)
-
     if pending:
         async def _fetch_agent(bridge_id_value, merged_info):
             version_id_value = merged_info.get("version_id")
