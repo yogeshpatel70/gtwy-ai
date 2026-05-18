@@ -211,6 +211,10 @@ async def process_single_testcase(testcase: dict[str, Any], db_config: dict[str,
         # Set conversation in db_config
         db_config["configuration"]["conversation"] = testcase.get("conversation", [])
 
+        # Force non-streaming for testcase execution so all versions return a
+        # parseable JSONResponse regardless of the bridge's configured stream flag.
+        db_config["configuration"]["stream"] = False
+
         # Create request data for this testcase
         testcase_request_data = {
             "body": {
