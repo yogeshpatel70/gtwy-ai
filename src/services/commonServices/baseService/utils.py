@@ -7,9 +7,9 @@ import httpx
 from fastapi import Request
 
 from globals import logger, traceback
-from src.configs.constant import inbuild_tools, redis_keys, service_name
+from src.configs.constant import GPT_MEMORY_TURNS_PER_CYCLE, inbuild_tools, redis_keys, service_name
 from src.controllers.rag_controller import get_text_from_vectorsQuery
-from src.services.cache_service import REDIS_PREFIX, client, find_in_cache, store_in_cache
+from src.services.cache_service import REDIS_PREFIX, client, find_in_cache, incr_in_cache, store_in_cache
 from src.services.utils.ai_call_util import call_gtwy_agent
 from src.services.utils.apiservice import fetch
 from src.services.utils.built_in_tools.firecrawl import call_firecrawl_scrape
@@ -356,6 +356,8 @@ async def send_message(cred, data):
 
 
 async def sendResponse(response_format, data, success=False, variables=None, meta=None):
+    if not response_format:
+        return
     if variables is None:
         variables = {}
     data_to_send = {"response" if success else "error": data, "success": success}
@@ -604,6 +606,26 @@ async def make_request_data_and_publish_sub_queue(parsed_data, result, params, t
     user_message = parsed_data.get("user", "")
     assistant_message = result.get("historyParams", {}).get("message", "")
 
+    gpt_memory_enabled = bool(parsed_data.get("gpt_memory"))
+    should_fire_gpt_memory = False
+    pending_turns: list = []
+    if gpt_memory_enabled and parsed_data.get("id"):
+        counter_key = f"{redis_keys['gpt_memory_counter_']}{parsed_data['id']}"
+        count = await incr_in_cache(counter_key)
+        should_fire_gpt_memory = count > 0 and count % GPT_MEMORY_TURNS_PER_CYCLE == 0
+        if should_fire_gpt_memory:
+            prior_conversation = (
+                parsed_data.get("configuration", {}).get("conversation") or []
+            )
+            pending_turns = [
+                msg
+                for msg in prior_conversation
+                if msg.get("role") not in ("tool", "tools_call")
+            ]
+            if user_message:
+                pending_turns.append({"role": "user", "content": user_message})
+            pending_turns.append({"role": "assistant", "content": assistant_message})
+
     data = {
         "metrics_service": {
             "dataset": [parsed_data.get("usage", {})],
@@ -633,10 +655,12 @@ async def make_request_data_and_publish_sub_queue(parsed_data, result, params, t
             "assistant" : result.get('response'),
             "purpose" : parsed_data.get('memory'),
             "gpt_memory_context" : parsed_data.get('gpt_memory_context'),
-            "org_id" : parsed_data.get('org_id')
+            "org_id" : parsed_data.get('org_id'),
+            "pending_turns": pending_turns,
+            "bridge_summary": parsed_data.get("bridge_summary"),
         },
         "check_handle_gpt_memory": {
-            "gpt_memory": parsed_data.get("gpt_memory"),
+            "gpt_memory": gpt_memory_enabled and should_fire_gpt_memory,
             "type": parsed_data.get("configuration", {}).get("type"),
         },
         "check_chatbot_suggestions": {

@@ -61,6 +61,7 @@ redis_keys = {
     "batch_": "batch_",
     "avg_response_time_": "avg_response_time_",
     "gpt_memory_": "gpt_memory_",
+    "gpt_memory_counter_": "gpt_memory_counter_",
     "timezone_and_org_": "timezone_and_org_",
     "conversation_": "conversation_",
     "bridgelastused_": "bridgelastused_",
@@ -99,6 +100,8 @@ new_agent_service = {
 inbuild_tools = {"Gtwy_Web_Search": "Gtwy_Web_Search"}
 
 VALID_RESPONSE_TYPES = {"text", "json_object", "json_schema"}
+
+GPT_MEMORY_TURNS_PER_CYCLE = 3
 
 agent_config_update_keys = {
     "_response_type": "_response_type",
