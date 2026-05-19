@@ -225,6 +225,7 @@ async def process_single_testcase(testcase: dict[str, Any], db_config: dict[str,
                     "_id": testcase.get("_id"),
                     "expected": testcase.get("expected"),
                     "type": testcase.get("type", "response"),
+                    "skip_testcase_creation": True,  # Don't create new testcases during execution
                 },
                 **db_config,
             },

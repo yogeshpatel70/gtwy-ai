@@ -951,7 +951,8 @@ async def process_background_tasks(
     from bson import ObjectId
     from src.controllers.testcase_controller import handle_playground_testcase
     testcase_data = parsed_data.get("testcase_data", {})
-    if testcase_data is not None:
+    # Skip testcase creation/update if running via testcase execution API
+    if testcase_data is not None and not testcase_data.get("skip_testcase_creation"):
         if testcase_data.get("testcase_id"):
             Flag = False
 
