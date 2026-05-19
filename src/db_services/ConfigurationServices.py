@@ -523,8 +523,9 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
                     }
                 }
             },
-            # Stage A (version only, no bridge_id): Convert parent_id string → ObjectId for $lookup
-            # Skipped when bridge_id is also provided — caller already has parent bridge context
+            # Stage A (version only): Convert parent_id string → ObjectId for $lookup.
+            # Runs whenever version_id is provided — bridge-level fields like bridgeType
+            # live on the bridge doc, not the version doc, so we must always enrich.
             *([{
                 "$addFields": {
                     "parent_bridge_oid": {
@@ -587,7 +588,7 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
                         "$ifNull": ["$bridge_limit_reset_period", {"$arrayElemAt": ["$parent_bridge_docs.bridge_limit_reset_period", 0]}]
                     },
                 }
-            }] if version_id and not bridge_id else []),
+            }] if version_id else []),
             # Stage 10: Remove temporary fields to clean up the output
             {
                 "$project": {
@@ -603,7 +604,7 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
                     **({
                         "parent_bridge_oid": 0,
                         "parent_bridge_docs": 0,
-                    } if version_id and not bridge_id else {}),
+                    } if version_id else {}),
                 }
             },
         ]
