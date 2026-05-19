@@ -243,12 +243,7 @@ async def _prepare_configuration_response(
         "gpt_memory": gpt_memory,
         "version_id": version_id or bridges.get("published_version_id"),
         "gpt_memory_context": gpt_memory_context,
-        "bridge_summary": (
-            bridge_data.get("bridge_summary")
-            or bridge_data.get("bridges", {}).get("bridge_summary")
-            or result.get("bridges", {}).get("bridge_summary")
-            or ""
-        ),
+        "bridge_summary": bridges.get("bridge_summary") or "",
         "settings": bridges.get("settings", {}),
         "variables": variables,
         "rag_data": rag_data,
