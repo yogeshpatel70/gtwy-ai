@@ -356,8 +356,6 @@ async def send_message(cred, data):
 
 
 async def sendResponse(response_format, data, success=False, variables=None, meta=None):
-    if not response_format:
-        return
     if variables is None:
         variables = {}
     data_to_send = {"response" if success else "error": data, "success": success}

@@ -1832,6 +1832,7 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                     accumulated_data=accumulated_payload,
                 )
                 await class_obj.streamer.close()
+            
         return {"success": True, "response": result.get("response", {})}
 
     except Exception as err:
