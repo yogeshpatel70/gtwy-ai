@@ -99,6 +99,7 @@ class BaseService:
         self.user_id = params.get("user_id")
         self.api_collection = params.get("api_collection")
         self.meta = params.get("meta")
+        self.tool_call_limit_error = None
         self.maximum_iteration_limit_reached = False
         self.stream_mode = params.get("customConfig", {}).get("stream") is True
         if self.stream_mode:

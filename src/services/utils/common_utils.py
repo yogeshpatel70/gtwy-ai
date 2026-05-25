@@ -1653,7 +1653,7 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                         if not is_nested_stream_call:
                             await class_obj.streamer.close()
                     await sendResponse(
-                        parsed_data.get("response_format"), str(retry_err), variables=parsed_data.get("variables", {})
+                        parsed_data.get("response_format"), str(retry_err), variables=parsed_data.get("variables", {}), meta=parsed_data.get("meta")
                     ) if (parsed_data.get("response_format") or {}).get("type") not in (None, "default") else None
                     if is_nested_stream_call:
                         await save_error_history(parsed_data, retry_err, params, timer, class_obj, thread_info)
@@ -1832,7 +1832,6 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                     accumulated_data=accumulated_payload,
                 )
                 await class_obj.streamer.close()
-
         return {"success": True, "response": result.get("response", {})}
 
     except Exception as err:

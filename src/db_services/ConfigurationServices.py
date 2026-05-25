@@ -951,6 +951,10 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
             if folder_result and folder_result[0].get("folder_post_tool"):
                 bridge_data["folder_post_tool"] = folder_result[0]["folder_post_tool"]
 
+            # Merge folder_post_tool into bridge_data
+            if folder_result and folder_result[0].get("folder_post_tool"):
+                bridge_data["folder_post_tool"] = folder_result[0]["folder_post_tool"]
+
             # Merge folder variables_path into bridge's variables_path
             if folder_result and folder_result[0].get("variables_path"):
                 folder_variables_path = folder_result[0]["variables_path"]
