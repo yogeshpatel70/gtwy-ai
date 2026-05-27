@@ -895,6 +895,7 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
                         "post_tool_id": "$config.post_tool_id",
                         "variables_path": {"$ifNull": ["$config.variables_path", {}]},
                         "folder_prompt": "$config.prompt",
+                        "folder_response_type": "$config.response_type",
                     }
                 },
             ]
@@ -978,6 +979,13 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
                 bridge_prompt = bridge_data.get("configuration", {}).get("prompt")
                 if isinstance(bridge_prompt, dict):
                     bridge_data["configuration"]["prompt"]["customPrompt"] = folder_prompt["customPrompt"]
+            
+            # Replace bridge response_type with folder response_type if present
+            folder_response_type = folder_result[0].get("folder_response_type") if folder_result else None
+            if folder_response_type and isinstance(folder_response_type, dict) and folder_response_type.get("type") == "json_schema":
+                bridge_data["configuration"]["response_type"]["mode"] = "custom"
+                bridge_data["configuration"]["response_type"]["value"] = folder_response_type
+            
             # Extract folder metadata
             if folder_result and folder_result[0].get("type"):
                 bridge_data["folder_type"] = folder_result[0]["type"]
