@@ -1372,12 +1372,11 @@ def validate_json_schema_configuration(configuration):
     if response_type.get("type") != "json_schema":
         return True, None
 
-    # If json_schema key exists and is None, return error
-    if "json_schema" in response_type and response_type["json_schema"] is None:
-        return False, "json_schema should be a valid JSON, not None"
-
-    # If json_schema key exists and is not None, validate it's valid JSON
-    if "json_schema" in response_type and response_type["json_schema"] is not None:
+    # Accept both nested format (json_schema key) and flattened format (direct schema fields)
+    # Check nested format first
+    if "json_schema" in response_type:
+        if response_type["json_schema"] is None:
+            return False, "json_schema should be a valid JSON, not None"
         try:
             # If it's already a dict/object, it's valid
             if isinstance(response_type["json_schema"], dict):
@@ -1390,8 +1389,12 @@ def validate_json_schema_configuration(configuration):
                 return False, "json_schema should be a valid JSON object or string"
         except (json.JSONDecodeError, TypeError):
             return False, "json_schema should be a valid JSON"
+    
+    # Check flattened format (OpenAI style: name, schema, strict at top level)
+    if "schema" in response_type and isinstance(response_type["schema"], dict):
+        return True, None
 
-    # If json_schema key is not present, it's an error — APIs require the schema body when type is json_schema
+    # If neither format is present, it's an error
     return False, "json_schema field is required when response_type.type is 'json_schema'"
 
 
