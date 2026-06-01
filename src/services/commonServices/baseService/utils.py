@@ -747,7 +747,7 @@ def build_accumulated_response(service, configuration, message_id, accumulated_c
         return {
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": full_text, "tool_calls": final_tool_calls},
+                "message": {"role": "assistant", "content": full_text, "tool_calls": final_tool_calls or []},
                 "finish_reason": final_finish_reason,
             }],
             "model": configuration.get("model", ""),
