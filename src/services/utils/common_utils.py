@@ -458,7 +458,7 @@ async def handle_pre_tools(parsed_data, custom_config):
             else:
                 parsed_data["variables"]["pre_function"] = pre_tool_response.get("response")
                 response_data = pre_tool_response.get("response", {})
-                Helper.update_agentconfig_from_pre_function(response_data, parsed_data, custom_config)
+                Helper.update_agentconfig_from_pre_function(response_data, parsed_data)
                 entry = {
                     "id": tool.get("name", ""),
                     "args": args,

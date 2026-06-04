@@ -36,6 +36,7 @@ from ..commonServices.openAI.openai_completion_response import OpenaiCompletion
 from ..commonServices.openAI.openai_embedding_call import OpenaiEmbedding
 from ..commonServices.openAI.openai_response import OpenaiResponse
 from ..commonServices.openRouter.openRouter_call import OpenRouter
+from ..commonServices.neevCloud.neevCloud_call import NeevCloud
 from ..cache_service import make_json_serializable
 
 
@@ -273,6 +274,8 @@ class Helper:
             class_obj = Grok(params)
         elif service == service_name["open_router"]:
             class_obj = OpenRouter(params)
+        elif service == service_name["neev_cloud"]:
+            class_obj = NeevCloud(params)
         elif service == service_name["mistral"]:
             class_obj = Mistral(params)
         elif service == service_name["deepgram"]:
@@ -532,24 +535,9 @@ class Helper:
         return {"fields": fields, "required": required}
 
     @staticmethod
-    def update_agentconfig_from_pre_function(response_data, parsed_data, custom_config):
+    def update_agentconfig_from_pre_function(response_data, parsed_data):
         if not isinstance(response_data, dict):
             return
-        
-        new_response_type = response_data.get(agent_config_update_keys["_response_type"])
-        if new_response_type:
-            if not isinstance(new_response_type, dict):
-                raise BadRequestException("Invalid _response_type format. Expected dict with 'type' field")
-            response_type_value = new_response_type.get("type")
-            if not response_type_value:
-                raise BadRequestException("Invalid _response_type: Missing 'type' field")
-            if response_type_value not in VALID_RESPONSE_TYPES:
-                raise BadRequestException(f"Invalid _response_type.type: '{response_type_value}'. Supported types: {', '.join(sorted(VALID_RESPONSE_TYPES))}")
-            if response_type_value == "json_schema" and not new_response_type.get("json_schema"):
-                raise BadRequestException("Invalid _response_type: 'json_schema' type requires 'json_schema' field")
-                
-            parsed_data["configuration"]["response_type"] = new_response_type
-            custom_config["response_type"] = new_response_type
         
         if user_message := response_data.get(agent_config_update_keys["_user_message"]):
             parsed_data["user"] = user_message
