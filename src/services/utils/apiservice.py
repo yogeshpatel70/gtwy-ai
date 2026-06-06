@@ -6,38 +6,14 @@ from io import BytesIO
 import aiohttp
 import certifi
 
+# Created once at startup — avoids reading CA bundle from disk on every request
 _ssl_context = ssl.create_default_context(cafile=certifi.where())
-_connector: aiohttp.TCPConnector | None = None
-
-
-def init_http_connector():
-    global _connector
-    _connector = aiohttp.TCPConnector(
-        ssl=_ssl_context,
-        limit=500,
-        limit_per_host=100,
-        ttl_dns_cache=300,
-        enable_cleanup_closed=True,
-    )
-
-
-async def close_http_connector():
-    global _connector
-    if _connector and not _connector.closed:
-        await _connector.close()
-    _connector = None
-
-
-def _get_connector() -> aiohttp.TCPConnector:
-    if _connector is None or _connector.closed:
-        # Fallback if called before startup (e.g. tests)
-        init_http_connector()
-    return _connector
 
 
 async def fetch(url, method="GET", headers=None, params=None, json_body=None, image=None):
     timeout = aiohttp.ClientTimeout(total=600, connect=15)
-    async with aiohttp.ClientSession(connector=_get_connector(), connector_owner=False, timeout=timeout) as session:
+    connector = aiohttp.TCPConnector(ssl=_ssl_context)
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         body = None if method.upper() == "GET" else json_body
         async with session.request(
             method=method, url=url, headers=headers, params=params, json=body
@@ -59,9 +35,9 @@ async def fetch_stream(url, method="POST", headers=None, json_body=None):
     # (e.g. OpenAI ``response.image_generation_call.partial_image``), which
     # exceed aiohttp's default ~128 KB per-line limit.
     timeout = aiohttp.ClientTimeout(total=900, connect=15, sock_read=120)
+    connector = aiohttp.TCPConnector(ssl=_ssl_context)
     async with aiohttp.ClientSession(
-        connector=_get_connector(),
-        connector_owner=False,
+        connector=connector,
         read_bufsize=64 * 1024 * 1024,
         timeout=timeout,
     ) as session:
