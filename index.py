@@ -18,6 +18,7 @@ from src.routes.rag_routes import router as rag_routes
 from src.routes.v2.modelRouter import router as v2_router
 from src.services.commonServices.queueService.queueLogService import sub_queue_obj
 from src.services.commonServices.queueService.queueService import queue_obj
+from src.services.utils.apiservice import close_http_connector, init_http_connector
 from src.services.utils.auto_router_utils import run_supported_services_refresh_loop
 from src.services.utils.batch_script import repeat_function
 
@@ -29,6 +30,7 @@ async def consume_messages_in_executor():
 async def lifespan(app: FastAPI):
     """Handle startup and shutdown events."""
     logger.info("Starting up...")
+    init_http_connector()
     await init_model_configuration()
     # Run the consumer in the background without blocking the main event loop
     await queue_obj.connect()
@@ -52,6 +54,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown logic
     logger.info("Shutting down...")
+    await close_http_connector()
 
     logger.info("Shutting down MongoDB change stream listener.")
     change_stream_task.cancel()
