@@ -103,7 +103,7 @@ async def healthcheck():
     return JSONResponse(
         status_code=200,
         content={
-            "status": "OK running good... v1.2",
+            "status": "OK running good... v1.3",
         },
     )
 
