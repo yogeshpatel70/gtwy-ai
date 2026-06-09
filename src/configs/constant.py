@@ -13,12 +13,14 @@ service_name = {
     "gemini": "gemini",
     "anthropic": "anthropic",
     "grok": "grok",
+    "deepseek": "deepseek",
     "groq": "groq",
     "open_router": "open_router",
     "mistral": "mistral",
     "deepgram": "deepgram",
     "openai_completion": "openai_completion",
     "neev_cloud": "neev_cloud",
+    "moonshot": "moonshot",
 }
 
 bridge_ids = {
@@ -101,8 +103,10 @@ new_agent_service = {
     "mistral": "mistral-medium-latest",
     "gemini": "gemini-2.5-flash",
     "grok": "grok-4-fast",
+    "deepseek": "deepseek-v4-flash",
     "deepgram": "nova-3",
     "neev_cloud": "gpt-oss-120b",
+    "moonshot": "kimi-k2.6",
 }
 
 inbuild_tools = {"Gtwy_Web_Search": "Gtwy_Web_Search"}

@@ -87,9 +87,11 @@ async def check_space_issue(response, service=None):
         service == service_name["openai_completion"]
         or service == service_name["groq"]
         or service == service_name["grok"]
+        or service == service_name["deepseek"]
         or service == service_name["open_router"]
         or service == service_name["mistral"]
         or service == service_name["neev_cloud"]
+        or service == service_name["moonshot"]
     ):
         content = response.get("choices", [{}])[0].get("message", {}).get("content", None)
 
@@ -131,8 +133,11 @@ async def check_space_issue(response, service=None):
             service == service_name["openai_completion"]
             or service == service_name["groq"]
             or service == service_name["grok"]
+            or service == service_name["deepseek"]
             or service == service_name["open_router"]
             or service == service_name["mistral"]
+            or service == service_name["neev_cloud"]
+            or service == service_name["moonshot"]
             or service == service_name["gemini"]
         ):
             response["choices"][0]["message"]["content"] = text

@@ -19,6 +19,7 @@ from ..Google.gemini_image_model import gemini_image_model
 from ..Google.gemini_modelrun import gemini_modelrun, gemini_modelrun_stream
 from ..Google.gemini_video_model import gemini_video_model
 from ..grok.grokModelRun import grok_runmodel, grok_stream
+from ..deepseek.deepseekModelRun import deepseek_runmodel, deepseek_stream
 from ..groq.groqModelRun import groq_runmodel, groq_stream
 from ..Mistral.mistral_model_run import mistral_model_run, mistral_stream
 from ..openAI.image_model import OpenAIImageModel
@@ -26,6 +27,7 @@ from ..openAI.runModel import openai_completion, openai_response_model, openai_r
 from ..openAI.openai_stream_utils import sanitize_openai_response_item
 from ..openRouter.openRouter_modelrun import openrouter_modelrun, openrouter_stream
 from ..neevCloud.neevCloud_modelrun import neevcloud_modelrun, neevcloud_stream
+from ..moonShot.moonShot_modelrun import moonshot_modelrun, moonshot_stream
 from ..streaming_service import StreamingService
 from .utils import (
     build_accumulated_response,
@@ -154,9 +156,14 @@ class BaseService:
             tools[display_tool_name] = function_response["content"]
 
             match service:
-                case 'openai_completion' | 'groq' | 'grok' | 'open_router' | 'mistral' | 'neev_cloud':
+                case 'openai_completion' | 'groq' | 'grok' | 'open_router' | 'mistral' | 'neev_cloud' | 'moonshot' | 'deepseek':
                     assistant_tool_calls = response['choices'][0]['message']['tool_calls'][index]
-                    configuration['messages'].append({'role': 'assistant', 'content': None, 'tool_calls': [assistant_tool_calls]})
+                    assistant_msg = {'role': 'assistant', 'content': None, 'tool_calls': [assistant_tool_calls]}
+                    # Moonshot requires reasoning_content in assistant messages when thinking mode is enabled
+                    reasoning_content = response['choices'][0]['message'].get('reasoning_content')
+                    if reasoning_content is not None:
+                        assistant_msg['reasoning_content'] = reasoning_content
+                    configuration['messages'].append(assistant_msg)
                     tool_calls_id = assistant_tool_calls['id']
                     configuration['messages'].append(mapping_response_data[tool_calls_id])
                 case 'openai':
@@ -332,9 +339,11 @@ class BaseService:
             service_name["openai"],
             service_name["groq"],
             service_name["grok"],
+            service_name["deepseek"],
             service_name["anthropic"],
             service_name["open_router"],
             service_name["neev_cloud"],
+            service_name["moonshot"],
             service_name["mistral"],
             service_name["gemini"],
             service_name["openai_completion"],
@@ -349,8 +358,10 @@ class BaseService:
                     service_name["openai_completion"],
                     service_name["groq"],
                     service_name["grok"],
+                    service_name["deepseek"],
                     service_name["open_router"],
                     service_name["neev_cloud"],
+                    service_name["moonshot"],
                     service_name["gemini"],
                 ]:
                     _.set_(
@@ -443,7 +454,7 @@ class BaseService:
                 new_config.pop("stream")
 
             mcp_config = self.configuration.get("mcp_config") if isinstance(self.configuration, dict) else None
-            mcp_active = bool(mcp_config and mcp_config.get("enabled") and mcp_config.get("servers"))
+            mcp_active = bool(mcp_config and mcp_config.get("servers"))
             mcp_type = resolve_mcp_type(service, self.model) if mcp_active else None
             if mcp_active and mcp_type == "client":
                 client_mcp_config(service, configuration, mcp_config, self.tool_id_and_name_mapping)
@@ -455,6 +466,7 @@ class BaseService:
                     service == service_name["openai_completion"]
                     or service == service_name["groq"]
                     or service == service_name["grok"]
+                    or service == service_name["deepseek"]
                 ):
                     if configuration.get("tool_choice"):
                         if configuration["tool_choice"] not in ["auto", "none", "required", "default"]:
@@ -602,6 +614,21 @@ class BaseService:
                     count,
                     self.token_calculator,
                 )
+            elif service == service_name["deepseek"]:
+                response = await deepseek_runmodel(
+                    configuration,
+                    apikey,
+                    self.execution_time_logs,
+                    self.bridge_id,
+                    self.timer,
+                    self.message_id,
+                    self.org_id,
+                    self.name,
+                    self.org_name,
+                    service,
+                    count,
+                    self.token_calculator,
+                )
             elif service == service_name["open_router"]:
                 response = await openrouter_modelrun(
                     configuration,
@@ -619,6 +646,21 @@ class BaseService:
                 )
             elif service == service_name["neev_cloud"]:
                 response = await neevcloud_modelrun(
+                    configuration,
+                    apikey,
+                    self.execution_time_logs,
+                    self.bridge_id,
+                    self.timer,
+                    self.message_id,
+                    self.org_id,
+                    self.name,
+                    self.org_name,
+                    service,
+                    count,
+                    self.token_calculator,
+                )
+            elif service == service_name["moonshot"]:
+                response = await moonshot_modelrun(
                     configuration,
                     apikey,
                     self.execution_time_logs,
@@ -728,10 +770,14 @@ class BaseService:
                 generator = groq_stream(configuration, apikey)
             elif service == service_name["grok"]:
                 generator = grok_stream(configuration, apikey)
+            elif service == service_name["deepseek"]:
+                generator = deepseek_stream(configuration, apikey)
             elif service == service_name["open_router"]:
                 generator = openrouter_stream(configuration, apikey)
             elif service == service_name["neev_cloud"]:
                 generator = neevcloud_stream(configuration, apikey)
+            elif service == service_name["moonshot"]:
+                generator = moonshot_stream(configuration, apikey)
             elif service == service_name["mistral"]:
                 generator = mistral_stream(configuration, apikey)
             elif service == service_name["gemini"]:
@@ -757,6 +803,7 @@ class BaseService:
             if _stream_exc is not None:
                 raise _stream_exc
             accumulated_content = stream_state["accumulated_content"]
+            accumulated_reasoning = stream_state.get("accumulated_reasoning", [])
             final_tool_calls = stream_state["final_tool_calls"]
             final_usage = stream_state["final_usage"]
             final_finish_reason = stream_state["final_finish_reason"]
@@ -778,6 +825,7 @@ class BaseService:
                 final_finish_reason=final_finish_reason,
                 last_delta=last_delta,
                 service_tier=stream_service_tier,
+                accumulated_reasoning=accumulated_reasoning,
             )
 
             if self.token_calculator:
