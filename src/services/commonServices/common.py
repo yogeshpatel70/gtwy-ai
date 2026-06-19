@@ -626,6 +626,8 @@ async def chat(request_body):
             testcase_result = await process_single_testcase_result(
                 parsed_data.get("testcase_data", {}), result, parsed_data
             )
+            # Attach latency so it can be forwarded over RTLayer to the client
+            testcase_result["latency"] = latency
             result["response"]["testcase_result"] = testcase_result
 
             # Stamp the testcase fields onto historyParams so the log queue
@@ -636,6 +638,7 @@ async def chat(request_body):
                     "expected": testcase_result.get("expected"),
                     "actual": testcase_result.get("actual"),
                     "score": testcase_result.get("score"),
+                    "reason": testcase_result.get("reason"),
                     "matching_type": testcase_result.get("matching_type"),
                     "type": testcase_result.get("type"),
                     "success": testcase_result.get("success"),
