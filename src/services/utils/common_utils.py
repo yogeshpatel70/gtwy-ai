@@ -191,6 +191,8 @@ def parse_request_body(request_body):
         "pre_tools": body.get("pre_tools"),
         "version": state.get("version"),
         "fine_tune_model": body.get("configuration", {}).get("fine_tune_model", {}).get("current_model", {}),
+        "execution_time_logs": [],
+        "is_rich_text": body.get("configuration", {}).get("is_rich_text", False),
         "actions": body.get("actions", {}),
         "user_reference": body.get("user_reference", ""),
         "variables_path": body.get("variables_path") or {},
@@ -440,15 +442,17 @@ async def handle_fine_tune_model(parsed_data, custom_config):
         custom_config["model"] = parsed_data["fine_tune_model"]
 
 
-async def handle_pre_tools(parsed_data, custom_config):
+async def handle_pre_tools(parsed_data, custom_config, timer):
     pre_tools = parsed_data.get("pre_tools") or []
     if not pre_tools:
         return
 
     pre_tool_response = None
     entry = {}
-
+    execution_time_logs = []
     for tool in pre_tools:
+        timer.start()
+
         tool_type = tool.get("type")
         args = dict(tool.get("args", {}))
         args["user"] = parsed_data["user"]
@@ -575,6 +579,14 @@ async def handle_pre_tools(parsed_data, custom_config):
                     "args":args,
                     "error":pre_tool_response.get("status") != 1,
                 }
+        
+        execution_time_logs.append(
+            {
+                "step": f"PRETOOL: {tool_type}",
+                "time_taken": timer.stop("API chat completion"),
+            }
+        )
+    parsed_data['execution_time_logs'].extend(execution_time_logs)
     parsed_data.setdefault('pre_tool_response_to_save', {})
     parsed_data['pre_tool_response_to_save'].update({entry['id']: entry})
 
