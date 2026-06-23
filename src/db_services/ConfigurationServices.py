@@ -11,8 +11,7 @@ from src.configs.model_configuration import model_config_document
 
 from ..services.cache_service import delete_in_cache, find_in_cache, store_in_cache
 from ..services.cache_utils import extract_cache_tags, store_in_cache_with_tags
-from ..services.utils.time import with_timeout
-from ..services.utils.time import log_slow_call, SLOW_CALL_THRESHOLDS
+from ..services.utils.time import log_slow_call, SLOW_CALL_THRESHOLDS, with_timeout
 
 configurationModel = db["configurations"]
 apiCallModel = db["apicalls"]

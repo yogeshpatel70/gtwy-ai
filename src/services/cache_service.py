@@ -6,8 +6,7 @@ from redis.asyncio import Redis
 
 from config import Config
 from globals import logger
-from src.services.utils.time import SERVICE_TIMEOUTS
-from src.services.utils.time import log_slow_call, SLOW_CALL_THRESHOLDS
+from src.services.utils.time import log_slow_call, SLOW_CALL_THRESHOLDS, SERVICE_TIMEOUTS
 
 # Initialize the Redis client
 client = Redis.from_url(
