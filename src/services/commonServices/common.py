@@ -644,6 +644,7 @@ async def chat(request_body):
                     "error": testcase_result.get("error"),
                     "system_prompt": parsed_data.get("configuration", {}).get("prompt", ""),
                     "model": parsed_data.get("configuration", {}).get("model", ""),
+                    "is_overridden": parsed_data.get("testcase_data", {}).get("is_overridden", False),
                 }
 
             if parsed_data.get("body", {}).get("bridge_configurations", {}).get("playground_response_format"):
