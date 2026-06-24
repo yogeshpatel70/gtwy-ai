@@ -509,9 +509,9 @@ def build_rerun_queue_message(log, data_to_send):
 
     # Also update variables in bridge_configurations so they don't get clobbered during update in chat_multiple_agents
     bridge_confs = body.get("bridge_configurations") or {}
-    for _, b_config in bridge_confs.items():
-        if isinstance(b_config, dict):
-            b_config["variables"] = merged_variables
+    bridge_id = log.get("bridge_id")
+    if bridge_id and bridge_id in bridge_confs:
+        bridge_confs[bridge_id]["variables"] = merged_variables
 
     body.setdefault("settings", {}).update({"response_format": {"type": "default"}, "stream": False})
     return {"body": body, "state": data_to_send.get("state", {}), "path_params": data_to_send.get("path_params", {})}
