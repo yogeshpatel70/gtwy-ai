@@ -291,6 +291,10 @@ async def process_single_testcase(
         # parseable JSONResponse regardless of the bridge's configured stream flag.
         db_config["configuration"]["stream"] = False
 
+        settings = db_config.setdefault("settings", {})
+        if isinstance(settings.get("fall_back"), dict):
+            settings["fall_back"]["is_enable"] = False
+
         # Create request data for this testcase
         testcase_request_data = {
             "body": {
@@ -302,6 +306,7 @@ async def process_single_testcase(
                     "expected": testcase.get("expected"),
                     "type": testcase.get("type", "response"),
                     "skip_testcase_creation": True,  # Don't create new testcases during execution
+                    "is_overridden": bool(db_config.get("_testcase_model_overridden")),
                 },
                 **db_config,
             },
@@ -319,6 +324,7 @@ async def process_single_testcase(
 
         model_name = db_config.get("configuration", {}).get("model")
         service_name = db_config.get("service")
+        is_overridden = bool(db_config.get("_testcase_model_overridden"))
 
         # Detect non-exception error responses (e.g. JSONResponse with success=False)
         if isinstance(result_data, dict) and result_data.get("success") is False:
@@ -334,11 +340,12 @@ async def process_single_testcase(
                 "success": False,
                 "model": model_name,
                 "service": service_name,
+                "is_overridden": is_overridden,
             }
             await _publish_event(
                 rtlayer_cred,
                 "testcase_result",
-                {"version_id": version_id, "model": model_name, "service": service_name, "result": outcome},
+                {"version_id": version_id, "model": model_name, "service": service_name, "is_overridden": is_overridden, "result": outcome},
             )
             return outcome
 
@@ -370,11 +377,12 @@ async def process_single_testcase(
             "latency": testcase_result.get("latency") if isinstance(testcase_result, dict) else None,
             "model": model_name,
             "service": service_name,
+            "is_overridden": is_overridden,
         }
         await _publish_event(
             rtlayer_cred,
             "testcase_result",
-            {"version_id": version_id, "model": model_name, "service": service_name, "result": outcome},
+            {"version_id": version_id, "model": model_name, "service": service_name, "is_overridden": is_overridden, "result": outcome},
         )
         return outcome
 
@@ -386,8 +394,6 @@ async def process_single_testcase(
         if err_args and isinstance(err_args[0], dict):
             error_message = err_args[0].get("error") or error_message
         logger.error(f"Error processing testcase {testcase.get('_id')}: {error_message}")
-        model_name = db_config.get("configuration", {}).get("model")
-        service_name = db_config.get("service")
         outcome = {
             "testcase_id": str(testcase.get("_id")) if testcase.get("_id") != "direct_testcase" else "direct_testcase",
             "bridge_id": testcase.get("bridge_id"),
@@ -399,11 +405,12 @@ async def process_single_testcase(
             "success": False,
             "model": model_name,
             "service": service_name,
+            "is_overridden": is_overridden,
         }
         await _publish_event(
             rtlayer_cred,
             "testcase_result",
-            {"version_id": version_id, "model": model_name, "service": service_name, "result": outcome},
+            {"version_id": version_id, "model": model_name, "service": service_name, "is_overridden": is_overridden, "result": outcome},
         )
         return outcome
 
@@ -506,16 +513,22 @@ async def execute_testcases(
             request_data["testcase_data"],
             request_data["variables"],
         )
+        is_overridden = False
         if model_spec:
             db_config["service"] = (model_spec.get("service") or "").lower()
             db_config.setdefault("configuration", {})["model"] = model_spec.get("model")
+            is_overridden = True
         else:
             model_override = request_data.get("model_override")
             service_override = request_data.get("service_override")
             if service_override:
                 db_config["service"] = service_override.lower()
+                is_overridden = True
             if model_override:
                 db_config.setdefault("configuration", {})["model"] = model_override
+                is_overridden = True
+
+        db_config["_testcase_model_overridden"] = is_overridden
 
         results = await run_testcases_parallel(
             testcases,
@@ -540,6 +553,7 @@ async def execute_testcases(
             "results": results,
             "model": db_config.get("configuration", {}).get("model"),
             "service": db_config.get("service"),
+            "is_overridden": is_overridden,
             "tools_call_data": tools_call_data,
             "total_tokens": total_tokens,
             "cost": total_cost,
