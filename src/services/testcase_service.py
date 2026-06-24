@@ -516,7 +516,7 @@ async def execute_testcases(
         is_overridden = False
         new_service: str | None = None
         if model_spec:
-            new_service = (model_spec.get("service"))
+            new_service = (model_spec.get("service") or "").lower()
             db_config["service"] = new_service
             db_config.setdefault("configuration", {})["model"] = model_spec.get("model")
             is_overridden = True
@@ -524,7 +524,7 @@ async def execute_testcases(
             model_override = request_data.get("model_override")
             service_override = request_data.get("service_override")
             if service_override:
-                new_service = service_override
+                new_service = service_override.lower()
                 db_config["service"] = new_service
                 is_overridden = True
             if model_override:
