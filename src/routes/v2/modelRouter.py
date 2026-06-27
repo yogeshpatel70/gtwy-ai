@@ -10,6 +10,7 @@ from src.middlewares.ratelimitMiddleware import rate_limit
 from src.services.commonServices.baseService.utils import make_request_data
 from src.services.commonServices.common import batch, chat_multiple_agents, embedding, image
 from src.services.commonServices.queueService.queueService import queue_obj
+from src.services.commonServices.stream_registry import abort as abort_stream
 from src.services.utils.helper import queue_rerun_messages
 
 from ...middlewares.getDataUsingBridgeId import add_configuration_data_to_body
@@ -72,6 +73,30 @@ async def chat_completion(request: Request, db_config: dict = Depends(add_config
             return result
         result = await chat_multiple_agents(data_to_send)
         return result
+
+@router.post("/chat/completion/abort", dependencies=[Depends(jwt_middleware)])
+async def abort_chat_completion(request: Request):
+    """Abort an in-flight streaming chat completion by message_id.
+
+    Cancels the underlying provider HTTP connection so output-token billing
+    stops at the point of abort. Input tokens are already charged.
+
+    Body: {"message_id": "<uuid returned in the SSE `start` event>"}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    message_id = (body or {}).get("message_id")
+    if not message_id:
+        raise HTTPException(status_code=400, detail="message_id is required")
+
+    cancelled = abort_stream(str(message_id))
+    if not cancelled:
+        return {"success": False, "aborted": False, "message": "No active stream for message_id"}
+    return {"success": True, "aborted": True, "message_id": message_id}
+
 
 @router.post('/openai/responses', dependencies=[Depends(openai_sdk_middleware)])
 async def openai_sdk_responses(request: Request, db_config: dict = Depends(add_configuration_data_to_body)):

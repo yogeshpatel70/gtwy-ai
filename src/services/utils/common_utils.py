@@ -1929,6 +1929,37 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
             
         return {"success": True, "response": result.get("response", {})}
 
+    except asyncio.CancelledError:
+        # Client requested abort via stream_registry.abort(message_id).
+        # Cancelling this task tears down the upstream provider HTTP connection,
+        # which stops billing for any further output tokens.
+        logger.info(
+            f"SSE stream aborted by client ({original_service}/{original_model}) "
+            f"message_id={parsed_data.get('message_id')}"
+        )
+        if class_obj.streamer:
+            try:
+                await class_obj.streamer.emit_aborted(
+                    message_id=str(parsed_data.get("message_id") or ""),
+                    reason="client_abort",
+                )
+            except Exception:
+                pass
+            if not is_nested_stream_call:
+                try:
+                    await class_obj.streamer.close()
+                except Exception:
+                    pass
+        try:
+            await save_error_history(
+                parsed_data, Exception("client_abort"), params, timer, class_obj, thread_info
+            )
+        except Exception:
+            pass
+        # Do NOT re-raise: swallow so the background task finishes cleanly and
+        # the SSE generator drains the final `aborted` event to the client.
+        return {"success": False, "message": "client_abort", "response": {}}
+
     except Exception as err:
         logger.error(f"SSE error ({original_service}/{original_model}): {str(err)}, {tb.format_exc()}")
         if class_obj.streamer:

@@ -13,6 +13,7 @@ from src.configs.constant import alert_types, redis_keys
 from src.handler.executionHandler import handle_exceptions
 from src.send_alert import send_alert
 from src.services.auto_router_service import apply_auto_model_selection
+from src.services.commonServices.stream_registry import register as register_stream
 from src.services.cache_service import find_in_cache, store_in_cache
 from src.services.todo.planner_service import prepare_planner_request
 from src.services.todo.todo_handler import handle_todo_mode
@@ -367,6 +368,8 @@ async def chat(request_body):
                 class_obj, parsed_data, params, timer, thread_info, transfer_request_id, bridge_configurations,
                 request_body=request_body, chat_function=chat,
             ))
+            # Register so the abort endpoint can cancel this stream by message_id.
+            register_stream(str(parsed_data.get("message_id") or ""), _stream_task)
             # See note above: defer cleanup so streaming honors maximum_iterations.
             asyncio.create_task(cleanup_tool_count_after(
                 _stream_task, tool_count_key_for_cleanup, tool_count_owner_token,

@@ -79,6 +79,14 @@ class StreamingService:
             payload["response"] = accumulated_data
         await self._emit(payload)
 
+    async def emit_aborted(self, message_id: str, reason: str = "client_abort"):
+        """Emitted when a streaming request is cancelled (e.g. user stop button)."""
+        await self._emit({
+            "event": "aborted",
+            "message_id": message_id,
+            "reason": reason,
+        })
+
     async def emit_error(self, error: str, fallback_error: str = None):
         payload = {"event": "error", "error": error}
         if fallback_error is not None:
