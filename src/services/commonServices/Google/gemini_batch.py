@@ -148,6 +148,11 @@ class GeminiBatch(BaseService):
             "version_id": getattr(self, 'version_id', ''),
             "thread_id": self.thread_id,
             "meta": getattr(self, 'meta', None),
+            # Stored so batch_script.py can validate/repair JSON and build retry sub-batches.
+            # ai_config_mapping is keyed by message_id → full provider-formatted request body,
+            # so the retry function can directly resubmit without any reconstruction.
+            "response_type": (self.customConfig or {}).get("response_type"),
+            "ai_config_mapping": config_mappings,
         }
         cache_key = f"{redis_keys['batch_']}{batch_job.name}"
         await store_in_cache(cache_key, batch_json, ttl=86400)

@@ -147,6 +147,8 @@ class OpenaiBatch(BaseService):
             "version_id": getattr(self, 'version_id', ''),
             "thread_id": self.thread_id,
             "meta": getattr(self, 'meta', None),
+            "response_type": (self.customConfig or {}).get("response_type"),
+            "ai_config_mapping": config_mappings,
         }
         cache_key = f"{redis_keys['batch_']}{batch_file.id}"
         await store_in_cache(cache_key, batch_json, ttl=86400)

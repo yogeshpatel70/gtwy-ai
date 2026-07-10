@@ -5,12 +5,29 @@ from ..commonServices.groq.groq_run_batch import handle_batch_results as groq_ha
 from ..commonServices.Mistral.mistral_run_batch import handle_batch_results as mistral_handle_batch
 from ..commonServices.openAI.openai_run_batch import handle_batch_results as openai_handle_batch
 
+# Import batch executor classes for the JSON retry sub-batch feature.
+# Lazy imports are used here to avoid circular dependency issues at module load time.
+from ..commonServices.anthropic.anthropic_batch import AnthropicBatch
+from ..commonServices.Google.gemini_batch import GeminiBatch
+from ..commonServices.groq.groq_batch import GroqBatch
+from ..commonServices.Mistral.mistral_batch import MistralBatch
+from ..commonServices.openAI.openai_batch import OpenaiBatch
+
 BATCH_RESULT_HANDLERS = {
     "gemini": gemini_handle_batch,
     "anthropic": anthropic_handle_batch,
     "openai": openai_handle_batch,
     "groq": groq_handle_batch,
     "mistral": mistral_handle_batch,
+}
+
+# Maps service name → batch executor class used by create_json_retry_batch()
+BATCH_RETRY_CLASSES = {
+    "openai": OpenaiBatch,
+    "anthropic": AnthropicBatch,
+    "gemini": GeminiBatch,
+    "groq": GroqBatch,
+    "mistral": MistralBatch,
 }
 
 
