@@ -228,6 +228,15 @@ async def _prepare_configuration_response(
     variables, org_name = await updateVariablesWithTimeZone(variables, org_id)
 
     add_connected_agents(bridges, tools, tool_id_and_name_mapping, orchestrator_flag)
+    
+    # PATTERN LEARNING: Add sequence executor and learned chains
+    from src.services.utils.getConfiguration_utils import (
+        add_sequence_executor_tool,
+        add_learned_chains
+    )
+    add_sequence_executor_tool(tools, tool_id_and_name_mapping)
+    await add_learned_chains(org_id, bridge_id, tools, tool_id_and_name_mapping)
+    
     web_search_filters_value = web_search_filters or bridges.get("web_search_filters") or {}
 
     # Fetch reviewer tools definitions if configured

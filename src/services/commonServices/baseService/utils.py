@@ -394,6 +394,7 @@ async def sendResponse(response_format, data, success=False, variables=None, met
 async def process_data_and_run_tools(codes_mapping, self):
     try:
         self.timer.start()
+        start_time_ms = self.timer.getTime() if hasattr(self.timer, "getTime") else 0
         executed_functions = []
         responses = []
         tool_call_logs = {**codes_mapping}
@@ -415,6 +416,23 @@ async def process_data_and_run_tools(codes_mapping, self):
             tool_data = {**tool, **tool_mapping, "name": name, "model_tool_name": original_name, "display_tool_name": display_tool_name}
 
             if not tool_data.get("response"):
+                # PATTERN LEARNING: Check for sequence execution or generated chains
+                if name == "execute_sequence" or tool_mapping.get("type") == "SEQUENCE":
+                    from src.services.pattern_learning.executor import execute_sequence
+                    
+                    # If this is an auto-generated chain, use its predefined steps
+                    if tool_mapping.get("auto_generated"):
+                        steps = tool_mapping.get("steps", [])
+                        # Wrap steps in expected format
+                        task = execute_sequence({"steps": steps}, self.tool_id_and_name_mapping, self)
+                    else:
+                        # Manual execute_sequence call with steps in args
+                        task = execute_sequence(tool_data.get("args", {}), self.tool_id_and_name_mapping, self)
+                    
+                    tasks.append((tool_call_key, tool_data, task))
+                    executed_functions.append(name)
+                    continue
+                
                 # if function is present in db/NO response, create task for async processing
                 if self.tool_id_and_name_mapping[name].get("type") == "RAG":
                     # Get the resource_to_collection_mapping from tool_id_and_name_mapping
@@ -525,6 +543,29 @@ async def process_data_and_run_tools(codes_mapping, self):
         self.function_time_logs.append(
             {"step": executed_names, "time_taken": self.timer.stop("process_data_and_run_tools")}
         )
+        
+        # PATTERN LEARNING: Track tool sequence for pattern detection
+        if len(tool_call_logs) >= 2 and hasattr(self, 'bridge_id') and hasattr(self, 'org_id'):
+            try:
+                from src.services.pattern_learning.pattern_tracker import track_tool_sequence
+                
+                # Calculate total latency
+                end_time_ms = self.timer.getTime() if hasattr(self.timer, "getTime") else 0
+                total_latency_ms = end_time_ms - start_time_ms
+                
+                # Track in background (don't block response)
+                asyncio.create_task(
+                    track_tool_sequence(
+                        org_id=self.org_id,
+                        bridge_id=self.bridge_id,
+                        thread_id=getattr(self, 'thread_id', ''),
+                        message_id=getattr(self, 'message_id', ''),
+                        tools_executed=tool_call_logs,
+                        total_latency_ms=total_latency_ms
+                    )
+                )
+            except Exception as tracking_error:
+                logger.warning(f"Pattern tracking failed (non-critical): {tracking_error}")
 
         return responses, mapping, tool_call_logs
 

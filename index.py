@@ -28,6 +28,7 @@ from src.routes.chatBot_routes import router as chatbot_router
 from src.routes.image_process_routes import router as image_process_routes
 from src.routes.rag_routes import router as rag_routes
 from src.routes.v2.modelRouter import router as v2_router
+from src.routes.pattern_routes import router as pattern_router
 from src.services.commonServices.queueService.queueLogService import sub_queue_obj
 from src.services.commonServices.queueService.queueService import queue_obj
 from src.services.utils.auto_router_utils import run_supported_services_refresh_loop
@@ -149,6 +150,7 @@ app.include_router(chatbot_router, prefix="/chatbot")
 app.include_router(image_process_routes, prefix="/image/processing")
 app.include_router(image_process_routes, prefix="/files")
 app.include_router(rag_routes, prefix="/rag")
+app.include_router(pattern_router)  # Pattern learning routes
 
 if __name__ == "__main__":
     PORT = int(Config.PORT)

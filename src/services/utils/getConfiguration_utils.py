@@ -358,6 +358,102 @@ def add_web_crawling_tool(tools, tool_id_and_name_mapping, built_in_tools, gtwy_
     }
 
 
+def add_sequence_executor_tool(tools, tool_id_and_name_mapping):
+    """Add execute_sequence meta-tool for chaining multiple tools"""
+    tools.append({
+        "type": "function",
+        "name": "execute_sequence",
+        "description": (
+            "Execute multiple tools in sequence where later tools depend on outputs from earlier tools. "
+            "Use this when you need to chain operations where tool B requires data from tool A's response. "
+            "Supports variable interpolation using {{stepN.output.path}} syntax to pass data between steps. "
+            "This reduces latency by eliminating AI round-trips between tool calls. "
+            "Example: Search flights (step 0), then check visa with {{step0.output.country_code}}, "
+            "then book hotel with {{step0.output.city}}."
+        ),
+        "properties": {
+            "steps": {
+                "type": "array",
+                "description": "Ordered list of tools to execute sequentially",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "tool": {
+                            "type": "string",
+                            "description": "Name of the tool to call"
+                        },
+                        "args": {
+                            "type": "object",
+                            "description": (
+                                "Arguments for this tool. Use {{stepN.output.field}} to reference "
+                                "outputs from previous steps (N is 0-indexed). Example: {{step0.output.country_code}}"
+                            )
+                        }
+                    },
+                    "required": ["tool", "args"]
+                }
+            }
+        },
+        "required": ["steps"]
+    })
+    
+    tool_id_and_name_mapping["execute_sequence"] = {
+        "type": "SEQUENCE",
+        "name": "execute_sequence",
+        "meta_tool": True
+    }
+
+
+async def add_learned_chains(org_id, bridge_id, tools, tool_id_and_name_mapping):
+    """Add auto-generated tool chains from learned patterns"""
+    try:
+        from src.services.pattern_learning.chain_generator import get_active_chains
+        
+        # Get active chains for this bridge
+        chains = await get_active_chains(org_id, bridge_id)
+        
+        for chain in chains:
+            chain_name = chain.get("name")
+            description = chain.get("description", "")
+            parameters = chain.get("parameters", {
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "object",
+                        "description": "Input parameters for the chain"
+                    }
+                }
+            })
+            steps = chain.get("steps", [])
+            
+            # Add chain as a tool
+            tools.append({
+                "type": "function",
+                "name": chain_name,
+                "description": description,
+                "properties": parameters.get("properties", {}),
+                "required": parameters.get("required", [])
+            })
+            
+            # Add to mapping
+            tool_id_and_name_mapping[chain_name] = {
+                "type": "SEQUENCE",
+                "name": chain_name,
+                "steps": steps,
+                "auto_generated": True,
+                "chain_id": chain.get("_id"),
+                "original_tools": chain.get("tools", [])
+            }
+        
+        if chains:
+            from globals import logger
+            logger.info(f"Added {len(chains)} learned tool chains for bridge {bridge_id}")
+        
+    except Exception as error:
+        from globals import logger
+        logger.warning(f"Could not load learned chains: {error}")
+
+
 def add_connected_agents(bridges, tools, tool_id_and_name_mapping, orchestrator_flag):
     """Add connected agents as tools"""
     connected_agents = bridges.get("connected_agents", {})
