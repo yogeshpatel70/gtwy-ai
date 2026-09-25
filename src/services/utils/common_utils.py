@@ -68,7 +68,7 @@ def setup_agent_tools(parsed_data, bridge_configurations, tool_data):
                 resolved[param] = agent_variables[param]
         return resolved
 
-    resolved_tools = []
+    # pre_tools: list with single tool at index 0 — resolve args if they contain variable references
     if isinstance(tool_data, list):
         tool = tool_data[0]
     else:
@@ -80,6 +80,7 @@ def setup_agent_tools(parsed_data, bridge_configurations, tool_data):
             "args": resolved_args,
             "config": tool_config
         }
+    resolved_tools = []
     tool_type = tool.get("_type")
     tool_config = tool.get("config", {})
     tool_args_mapping = tool.get("args", {})
@@ -89,6 +90,7 @@ def setup_agent_tools(parsed_data, bridge_configurations, tool_data):
         resolved_tools.append({
             "type": "custom_function",
             "name": tool_config.get("script_id"),
+            "url": tool_config.get("url"),
             "title": tool.get("title"),
             "args": resolved_args,
         })
@@ -99,9 +101,9 @@ def setup_agent_tools(parsed_data, bridge_configurations, tool_data):
             "config": tool_config,
             "title": tool.get("title"),
         })
-    
+
     return resolved_tools
-    
+
 async def handle_agent_transfer(
     result, request_body, bridge_configurations, chat_function, current_bridge_id=None, transfer_request_id=None
 ):
@@ -199,6 +201,9 @@ def parse_request_body(request_body):
         # along by transfers, so a chain started from a child stays nested.
         "nested_agent_call": bool(body.get("_nested_agent_call")),
         "org_billing_plan": body.get("org_billing_plan"),
+        # Set by reserve_credits_and_api_key_setup when the org's plan charges
+        # the per-hit fee even on its own API key (OWN_KEY_HIT_FEE_PLANS).
+        "charge_hit_fee": bool(body.get("charge_hit_fee")),
         "user": body.get("user"),
         "original_user": body.get("user"),
         "tools": body.get("configuration", {}).get("tools"),
@@ -477,6 +482,13 @@ async def load_model_configuration(model, configuration, service):
             if configuration.get(key):
                 custom_config[key] = configuration[key]
 
+    # response_type is handled even when the model's own schema doesn't declare
+    # it (normalize_response_type inlines the schema into the prompt for models
+    # that can't enforce it natively) — so it can't be dropped by the
+    # schema-driven loop above just because a model has no response_type field.
+    if "response_type" not in custom_config and configuration.get("response_type"):
+        custom_config["response_type"] = configuration["response_type"]
+
     return model_obj, custom_config, model_output_config
 
 
@@ -502,16 +514,20 @@ async def handle_pre_tools(parsed_data, custom_config, timer = None):
             timer.start()
 
         tool_type = tool.get("type")
+        tool_id = tool.get("id") or tool.get("name")
         args = dict(tool.get("args", {}))
         args["user"] = parsed_data["user"]
         args["_response_type"] = parsed_data["configuration"]["response_type"]
+
+        # Initialize entry with id for all tool types
+        entry = {"id": tool_id, "type": "pre_tool"}
 
         if tool_type == "custom_function":
             try:
                 _pre_t = _time.time()
                 pre_tool_response = await axios_work(
                     args,
-                    {"url": f"https://flow.sokt.io/func/{tool.get('name')}"},
+                    {"url": tool.get("url")},
                 )
                 log_slow_call(f"pre_function {tool.get('name')}", _time.time() - _pre_t, SLOW_CALL_THRESHOLDS["pre_function"])
                 if pre_tool_response.get("status") == 0:
@@ -650,6 +666,8 @@ async def handle_post_tool(parsed_data, result):
         logger.warning("post_tool configured but no script_id / function_name found; skipping")
         return
 
+    tool_url = post_tool_data.get("url")
+
     try:
         args = {
             **dict(post_tool_data.get("args", {})),
@@ -665,7 +683,7 @@ async def handle_post_tool(parsed_data, result):
 
         post_tool_response = await axios_work(
             args,
-            {"url": f"https://flow.sokt.io/func/{script_id}"},
+            {"url": tool_url},
         )
     except Exception as err:
         logger.error(f"post_tool execution error (script_id={script_id}): {err}")
@@ -1457,7 +1475,7 @@ def restructure_json_schema(response_type, service):
 
 
 
-def model_supports_json_schema(model_config):
+def model_supports_json_schema_or_text(model_config):
     """
     Return True if the model config advertises a json_schema response_type option.
 
@@ -1479,8 +1497,9 @@ def model_supports_json_schema(model_config):
 
     options = response_type.get("options")
     if not isinstance(options, list):
-        return True
-    return any(isinstance(opt, dict) and opt.get("type") == "json_schema" for opt in options)
+        return (False, False)
+    return ((any(isinstance(opt, dict) and opt.get("type") == "json_schema" for opt in options)),(
+        any(isinstance(opt, dict) and opt.get("type") == "text" for opt in options)))
 
 
 def normalize_response_type(custom_config, service, model_config=None):
@@ -1509,14 +1528,17 @@ def normalize_response_type(custom_config, service, model_config=None):
         if text_value:
             # Store the text instruction in a separate key to be added to system message
             custom_config["_text_instruction"] = text_value
-        custom_config["response_type"] = {"type": "text"}
+        _, is_text_support = model_supports_json_schema_or_text(model_config)
+        if not is_text_support:
+            custom_config.pop("response_type", None)
         return
 
     if rtype == "json_object":
         return
 
     if rtype == "json_schema":
-        if model_supports_json_schema(model_config):
+        is_json_schema_support, _ = model_supports_json_schema_or_text(model_config)
+        if is_json_schema_support:
             custom_config["response_type"] = restructure_json_schema(response_type, service)
         else:
             # Model can't enforce a json_schema: inline the schema into the prompt and
